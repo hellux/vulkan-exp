@@ -2,7 +2,7 @@
 .SUFFIXES: .glsl .spv
 
 LDFLAGS = -lvulkan -lSDL2
-CFLAGS = -std=c99 -Wall
+CFLAGS = -std=c99 -Wall -Werror
 
 TRI_OBJ = triangle/triangle.o
 TRI_SHD = triangle/shader.vert.spv triangle/shader.frag.spv
