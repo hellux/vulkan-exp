@@ -8,7 +8,7 @@
 
 #define APP_NAME "VULKAN_TEST"
 
-#define CONCURRENT_FRAMES 2
+#define CONCURRENT_FRAMES 3
 
 struct render_handles {
     SDL_Window *window;
@@ -673,6 +673,11 @@ void render_swapchain_destroy(struct render_handles *rh) {
     vkDestroySwapchainKHR(rh->device, rh->sc, NULL);
 }
 
+void render_swapchain_recreate(struct render_handles *rh) {
+    render_swapchain_destroy(rh);
+    render_swapchain_create(rh);
+}
+
 void render_init(struct render_handles *rh) {
     if (SDL_Init(SDL_INIT_VIDEO) != 0)
         die("failed to initialize sdl -- %s", SDL_GetError());
@@ -725,11 +730,17 @@ void render_destroy(struct render_handles *rh) {
 void render_draw(struct render_handles *rh) {
     vkWaitForFences(rh->device, 1, &rh->frm_inflight[rh->frm_index],
                     VK_TRUE, 1e9);
-    vkResetFences(rh->device, 1, &rh->frm_inflight[rh->frm_index]);
+
     uint32_t img_index;
-    vkAcquireNextImageKHR(rh->device, rh->sc, UINT64_MAX,
-                          rh->img_available[rh->frm_index],
-                          VK_NULL_HANDLE, &img_index);
+    VkResult res = vkAcquireNextImageKHR(rh->device, rh->sc, UINT64_MAX,
+                                         rh->img_available[rh->frm_index],
+                                         VK_NULL_HANDLE, &img_index);
+    if (res == VK_ERROR_OUT_OF_DATE_KHR || res == VK_SUBOPTIMAL_KHR) {
+        render_swapchain_recreate(rh);
+        return;
+    }
+
+    vkResetFences(rh->device, 1, &rh->frm_inflight[rh->frm_index]);
 
     VkPipelineStageFlags wait_stages[] =
         {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
@@ -744,7 +755,8 @@ void render_draw(struct render_handles *rh) {
         .pSignalSemaphores = &rh->img_rendered[rh->frm_index],
     };
 
-    if (vkQueueSubmit(rh->queue, 1, &submit_info, VK_NULL_HANDLE) != VK_SUCCESS)
+    if (vkQueueSubmit(rh->queue, 1, &submit_info,
+                      rh->frm_inflight[rh->frm_index]) != VK_SUCCESS)
         die("failed to submit draw command buffer");
 
     VkPresentInfoKHR present_info = {
@@ -771,10 +783,6 @@ int main(void) {
     while (!quit) {
         while (SDL_PollEvent(&event) != 0) {
             switch (event.type) {
-            case SDL_WINDOWEVENT:
-                render_swapchain_destroy(&rh);
-                render_swapchain_create(&rh);
-                break;
             case SDL_QUIT:
                 quit = true;
                 break;
