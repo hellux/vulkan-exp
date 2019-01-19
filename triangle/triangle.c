@@ -8,6 +8,8 @@
 
 #define APP_NAME "VULKAN_TEST"
 
+#define CONCURRENT_FRAMES 2
+
 struct render_handles {
     SDL_Window *window;
     VkInstance instance;
@@ -28,9 +30,11 @@ struct render_handles {
     VkImageView *sc_ivs;
     VkFramebuffer *sc_fbs;
     VkCommandBuffer *sc_cbs;
+    VkSemaphore *img_available;
+    VkSemaphore *img_rendered;
+    VkFence frm_inflight[CONCURRENT_FRAMES];
 
-    VkSemaphore img_available;
-    VkSemaphore img_rendered;
+    size_t frm_index;
 };
 
 void die(const char *fmt, ...) {
@@ -206,21 +210,6 @@ void vulkan_swapchain(VkPhysicalDevice physical, VkDevice device,
                       VkSwapchainKHR *swapchain) {
     VkSurfaceCapabilitiesKHR caps;
     vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physical, surface, &caps);
-    printf("Device capabilities:\n");
-    printf(" minImageCount: %d\n", caps.minImageCount);
-    printf(" maxImageCount: %d\n", caps.maxImageCount);
-    printf(" currentExtent: (%d, %d)\n", caps.currentExtent.width,
-                                        caps.currentExtent.height);
-    printf(" minImageExtent: (%d, %d)\n", caps.minImageExtent.width,
-                                         caps.minImageExtent.height);
-    printf(" maxImageExtent: (%d, %d)\n", caps.maxImageExtent.width,
-                                         caps.maxImageExtent.height);
-    printf(" maxImageArrayLayers: %d\n", caps.maxImageArrayLayers);
-    printf(" supportedTransforms: %d\n", caps.supportedTransforms);
-    printf(" currentTransform: %d\n", caps.currentTransform);
-    printf(" supportedCompositeAlpha: %d\n", caps.supportedCompositeAlpha);
-    printf(" supportedUsageFlags: %d\n", caps.supportedUsageFlags);
-
     *extent = caps.currentExtent;
 
     uint32_t fmtc;
@@ -617,18 +606,71 @@ void vulkan_cmdbuffers(VkDevice device, size_t image_count,
     *command_buffers = cbs;
 }
 
-void vulkan_semaphores(VkDevice device,
-                       VkSemaphore *img_available, VkSemaphore *img_rendered) {
-    VkSemaphoreCreateInfo create_info = {
+void vulkan_synchronization(VkDevice device, size_t image_count,
+                            VkSemaphore **img_available,
+                            VkSemaphore **img_rendered,
+                            VkFence *frm_inflight) {
+    VkSemaphore *imgav = malloc(image_count*sizeof(VkSemaphore));
+    VkSemaphore *imgrn = malloc(image_count*sizeof(VkSemaphore));
+
+    VkSemaphoreCreateInfo sema_info = {
         .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO
     };
     
-    if (vkCreateSemaphore(device, &create_info, NULL, img_available)
-            != VK_SUCCESS)
-        die("failed to create avail semaphore");
-    if (vkCreateSemaphore(device, &create_info, NULL, img_rendered)
-            != VK_SUCCESS)
-        die("failed to create render semaphore");
+    for (int i = 0; i < image_count; i++) {
+        if (vkCreateSemaphore(device, &sema_info, NULL, &imgav[i])
+                != VK_SUCCESS ||
+            vkCreateSemaphore(device, &sema_info, NULL, &imgrn[i])
+                != VK_SUCCESS)
+            die("failed to create semaphores for image %d", i);
+    }
+
+    *img_available = imgav;
+    *img_rendered = imgrn;
+
+    VkFenceCreateInfo fence_info = {
+        .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+        .flags = VK_FENCE_CREATE_SIGNALED_BIT
+    };
+
+    for (int i = 0; i < CONCURRENT_FRAMES; i++) {
+        if (vkCreateFence(device, &fence_info, NULL, &frm_inflight[i])
+                != VK_SUCCESS)
+            die("failed to create fence for frame %d", i);
+    }
+}
+
+void render_swapchain_create(struct render_handles *rh) {
+    vulkan_swapchain(rh->physical, rh->device, rh->surface,
+                     &rh->format, &rh->sc_extent, &rh->sc);
+    vulkan_imageviews(rh->device, rh->sc, rh->format,
+                      &rh->sc_imgc, &rh->sc_imgs, &rh->sc_ivs);
+    vulkan_renderpass(rh->device, rh->format,
+                      &rh->renderpass);
+    vulkan_pipeline(rh->device, rh->sc_extent, rh->renderpass,
+                    &rh->layout, &rh->pipeline);
+    vulkan_framebuffers(rh->device, rh->sc_imgc, rh->sc_ivs,
+                        rh->renderpass, rh->sc_extent,
+                        &rh->sc_fbs);
+    vulkan_cmdbuffers(rh->device, rh->sc_imgc, rh->renderpass, rh->pipeline,
+                      rh->sc_extent, rh->sc_fbs, rh->cmdpool,
+                      &rh->sc_cbs);
+}
+
+void render_swapchain_destroy(struct render_handles *rh) {
+    vkDeviceWaitIdle(rh->device);
+
+    vkFreeCommandBuffers(rh->device, rh->cmdpool, rh->sc_imgc, rh->sc_cbs);
+    for (int i = 0; i < rh->sc_imgc; i++) {
+        vkDestroyFramebuffer(rh->device, rh->sc_fbs[i], NULL);
+    }
+    vkDestroyPipeline(rh->device, rh->pipeline, NULL);
+    vkDestroyPipelineLayout(rh->device, rh->layout, NULL);
+    vkDestroyRenderPass(rh->device, rh->renderpass, NULL);
+    for (int i = 0; i < rh->sc_imgc; i++) {
+        vkDestroyImageView(rh->device, rh->sc_ivs[i], NULL);
+    }
+    vkDestroySwapchainKHR(rh->device, rh->sc, NULL);
 }
 
 void render_init(struct render_handles *rh) {
@@ -641,64 +683,65 @@ void render_init(struct render_handles *rh) {
     if (!rh->window)
         die("failed to create sdl window -- %s", SDL_GetError());
 
-    vulkan_instance(rh->window, &rh->instance);
-    vulkan_physical(rh->instance, &rh->physical);
+    vulkan_instance(rh->window,
+                    &rh->instance);
+    vulkan_physical(rh->instance,
+                    &rh->physical);
     vulkan_logical(rh->instance, rh->physical, rh->window,
                    &rh->surface, &rh->device, &rh->queue);
-    vulkan_swapchain(rh->physical, rh->device, rh->surface,
-                     &rh->format, &rh->sc_extent, &rh->sc);
-    vulkan_imageviews(rh->device, rh->sc, rh->format,
-                      &rh->sc_imgc, &rh->sc_imgs, &rh->sc_ivs);
-    vulkan_renderpass(rh->device, rh->format, &rh->renderpass);
-    vulkan_pipeline(rh->device, rh->sc_extent,
-                    rh->renderpass,
-                    &rh->layout, &rh->pipeline);
-    vulkan_framebuffers(rh->device, rh->sc_imgc, rh->sc_ivs,
-                        rh->renderpass, rh->sc_extent, &rh->sc_fbs);
-    vulkan_cmdpool(rh->device, &rh->cmdpool);
-    vulkan_cmdbuffers(rh->device, rh->sc_imgc, rh->renderpass, rh->pipeline,
-                      rh->sc_extent, rh->sc_fbs, rh->cmdpool, &rh->sc_cbs);
-    vulkan_semaphores(rh->device, &rh->img_available, &rh->img_rendered);
+    vulkan_cmdpool(rh->device,
+                   &rh->cmdpool);
+    render_swapchain_create(rh);
+    vulkan_synchronization(rh->device, rh->sc_imgc,
+                           &rh->img_available,
+                           &rh->img_rendered,
+                           rh->frm_inflight);
 }
 
 void render_destroy(struct render_handles *rh) {
-    vkDeviceWaitIdle(rh->device);
-    vkDestroySemaphore(rh->device, rh->img_available, NULL);
-    vkDestroySemaphore(rh->device, rh->img_rendered, NULL);
+    render_swapchain_destroy(rh);
+
+    for (int i = 0; i < CONCURRENT_FRAMES; i++) {
+        vkDestroyFence(rh->device, rh->frm_inflight[i], NULL);
+    }
+    for (int i = 0; i < rh->sc_imgc; i++) {
+        vkDestroySemaphore(rh->device, rh->img_available[i], NULL);
+        vkDestroySemaphore(rh->device, rh->img_rendered[i], NULL);
+    }
+
     vkDestroyCommandPool(rh->device, rh->cmdpool, NULL);
-    for (int i = 0; i < rh->sc_imgc; i++) {
-        vkDestroyFramebuffer(rh->device, rh->sc_fbs[i], NULL);
-    }
-    vkDestroyPipeline(rh->device, rh->pipeline, NULL);
-    vkDestroyPipelineLayout(rh->device, rh->layout, NULL);
-    vkDestroyRenderPass(rh->device, rh->renderpass, NULL);
-    for (int i = 0; i < rh->sc_imgc; i++) {
-        vkDestroyImageView(rh->device, rh->sc_ivs[i], NULL);
-    }
-    vkDestroySwapchainKHR(rh->device, rh->sc, NULL);
     vkDestroyDevice(rh->device, NULL);
     vkDestroySurfaceKHR(rh->instance, rh->surface, NULL);
     vkDestroyInstance(rh->instance, NULL);
     SDL_DestroyWindow(rh->window);
+
+    free(rh->sc_imgs);
+    free(rh->sc_fbs);
+    free(rh->sc_cbs);
+    free(rh->img_available);
+    free(rh->img_rendered);
 }
 
 void render_draw(struct render_handles *rh) {
-    uint32_t image_index;
-    vkAcquireNextImageKHR(rh->device, rh->sc, 5e9,
-                          rh->img_available,
-                          VK_NULL_HANDLE, &image_index);
+    vkWaitForFences(rh->device, 1, &rh->frm_inflight[rh->frm_index],
+                    VK_TRUE, 1e9);
+    vkResetFences(rh->device, 1, &rh->frm_inflight[rh->frm_index]);
+    uint32_t img_index;
+    vkAcquireNextImageKHR(rh->device, rh->sc, UINT64_MAX,
+                          rh->img_available[rh->frm_index],
+                          VK_NULL_HANDLE, &img_index);
 
     VkPipelineStageFlags wait_stages[] =
         {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
     VkSubmitInfo submit_info = {
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
         .waitSemaphoreCount = 1,
-        .pWaitSemaphores = &rh->img_available,
+        .pWaitSemaphores = &rh->img_available[rh->frm_index],
         .pWaitDstStageMask = wait_stages,
         .commandBufferCount = 1,
-        .pCommandBuffers = &rh->sc_cbs[image_index],
+        .pCommandBuffers = &rh->sc_cbs[img_index],
         .signalSemaphoreCount = 1,
-        .pSignalSemaphores = &rh->img_rendered,
+        .pSignalSemaphores = &rh->img_rendered[rh->frm_index],
     };
 
     if (vkQueueSubmit(rh->queue, 1, &submit_info, VK_NULL_HANDLE) != VK_SUCCESS)
@@ -707,18 +750,20 @@ void render_draw(struct render_handles *rh) {
     VkPresentInfoKHR present_info = {
         .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
         .waitSemaphoreCount = 1,
-        .pWaitSemaphores = &rh->img_rendered,
+        .pWaitSemaphores = &rh->img_rendered[rh->frm_index],
         .swapchainCount = 1,
         .pSwapchains = &rh->sc,
-        .pImageIndices = &image_index,
+        .pImageIndices = &img_index,
         .pResults = NULL,
     };
 
     vkQueuePresentKHR(rh->queue, &present_info);
+
+    rh->frm_index = (rh->frm_index + 1) % CONCURRENT_FRAMES;
 }
 
 int main(void) {
-    struct render_handles rh;
+    struct render_handles rh = {0};
     render_init(&rh);
 
     SDL_Event event;
@@ -726,6 +771,10 @@ int main(void) {
     while (!quit) {
         while (SDL_PollEvent(&event) != 0) {
             switch (event.type) {
+            case SDL_WINDOWEVENT:
+                render_swapchain_destroy(&rh);
+                render_swapchain_create(&rh);
+                break;
             case SDL_QUIT:
                 quit = true;
                 break;
