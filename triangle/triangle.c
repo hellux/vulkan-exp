@@ -19,12 +19,18 @@ struct render_handles {
     VkRenderPass renderpass;
     VkPipelineLayout layout;
     VkPipeline pipeline;
+    VkCommandPool cmdpool;
 
     VkSwapchainKHR sc;
     VkExtent2D sc_extent;
     uint32_t sc_imgc;
     VkImage *sc_imgs;
     VkImageView *sc_ivs;
+    VkFramebuffer *sc_fbs;
+    VkCommandBuffer *sc_cbs;
+
+    VkSemaphore img_available;
+    VkSemaphore img_rendered;
 };
 
 void die(const char *fmt, ...) {
@@ -71,11 +77,23 @@ void vulkan_instance(SDL_Window *window, VkInstance *instance) {
     }
     printf("\n");
 
+    const char *layers[] = {
+#ifndef NDEBUG
+        "VK_LAYER_LUNARG_standard_validation"
+#endif
+    };
+    uint32_t layerc = sizeof(layers)/sizeof(*layers);
+    printf("enabled layers: ");
+    for (int i = 0; i < layerc; i++) {
+        printf("%s ", layers[i]);
+    }
+    printf("\n");
+
     VkInstanceCreateInfo create_info = {
         .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
         .pApplicationInfo = &app_info,
-        .enabledLayerCount = 0,
-        .ppEnabledLayerNames = NULL,
+        .enabledLayerCount = layerc,
+        .ppEnabledLayerNames = layers,
         .enabledExtensionCount = extc,
         .ppEnabledExtensionNames = ext,
     };
@@ -132,11 +150,16 @@ void vulkan_physical(VkInstance instance, VkPhysicalDevice *physical) {
     free(props);
 }
 
-void vulkan_logical(VkPhysicalDevice physical, VkDevice *device) {
+void vulkan_logical(VkInstance instance, VkPhysicalDevice physical,
+                    SDL_Window *window,
+                    VkSurfaceKHR *surface,
+                    VkDevice *device, VkQueue *queue) {
+    uint32_t family_index = 0;
+    uint32_t queue_index = 0;
     float prios[] = {1};
     VkDeviceQueueCreateInfo queue_create_info = {
         .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-        .queueFamilyIndex = 0,
+        .queueFamilyIndex = family_index,
         .queueCount = 1,
         .pQueuePriorities = prios,
     };
@@ -160,7 +183,19 @@ void vulkan_logical(VkPhysicalDevice physical, VkDevice *device) {
     };
 
     if (vkCreateDevice(physical, &create_info, NULL, device) != VK_SUCCESS)
-        die("failed to create logical device\n");
+        die("failed to create logical device");
+
+    vkGetDeviceQueue(*device, family_index, queue_index, queue);
+
+    if (!SDL_Vulkan_CreateSurface(window, instance, surface)) {
+        die("failed to create vulkan surface for sdl");
+    }
+
+    VkBool32 surface_supported;
+    vkGetPhysicalDeviceSurfaceSupportKHR(physical, family_index,
+                                         *surface, &surface_supported);
+    if (surface_supported != VK_TRUE)
+        die("device does not support presentation to surface");
 }
 
 void vulkan_swapchain(VkPhysicalDevice physical, VkDevice device,
@@ -241,6 +276,7 @@ void vulkan_imageviews(VkDevice device, VkSwapchainKHR swapchain,
     };
 
     VkImageSubresourceRange range = {
+        .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
         .baseMipLevel = 0,
         .levelCount = 1,
         .baseArrayLayer = 0,
@@ -259,7 +295,7 @@ void vulkan_imageviews(VkDevice device, VkSwapchainKHR swapchain,
 
         if (vkCreateImageView(device, &create_info, NULL, &ivs[i])
                 != VK_SUCCESS)
-            die("failed to creatie imageview %d\n", i);
+            die("failed to create imageview %d", i);
     }
 
     *image_count = imgc;
@@ -290,14 +326,24 @@ void vulkan_renderpass(VkDevice device, VkFormat format,
         .pColorAttachments = &color_attachment_ref,
     };
 
+    VkSubpassDependency dependency = {
+        .srcSubpass = VK_SUBPASS_EXTERNAL,
+        .dstSubpass = 0,
+        .srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        .dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        .srcAccessMask = 0,
+        .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+                         VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+    };
+
     VkRenderPassCreateInfo create_info = {
         .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
         .attachmentCount = 1,
         .pAttachments = &color_attachment,
         .subpassCount = 1,
         .pSubpasses = &subpass,
-        .dependencyCount = 0,
-        .pDependencies = NULL
+        .dependencyCount = 1,
+        .pDependencies = &dependency
     };
     if (vkCreateRenderPass(device, &create_info, NULL, renderpass)
             != VK_SUCCESS)
@@ -311,7 +357,7 @@ void vulkan_shader_module(VkDevice device, const char *path,
     size_t length = ftell(f);
     rewind(f);
 
-    if (length % 4 != 0) die("bytecode at %s unaligned\n", path);
+    if (length % 4 != 0) die("bytecode at %s unaligned", path);
 
     uint32_t *bytecode = malloc(length);
     fread((void*)bytecode, 1, length, f);
@@ -324,7 +370,7 @@ void vulkan_shader_module(VkDevice device, const char *path,
     };
 
     if (vkCreateShaderModule(device, &create_info, NULL, module) != VK_SUCCESS)
-        die("failed to create shader module for %s\n", path);
+        die("failed to create shader module for %s", path);
 
     free(bytecode);
 }
@@ -453,7 +499,7 @@ void vulkan_pipeline(VkDevice device, VkExtent2D extent,
     };
     if (vkCreatePipelineLayout(device, &layout_info, NULL, layout)
             != VK_SUCCESS)
-        die("failet to create pipeline layout\n");
+        die("failet to create pipeline layout");
 
     VkGraphicsPipelineCreateInfo create_info = {
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
@@ -482,6 +528,107 @@ void vulkan_pipeline(VkDevice device, VkExtent2D extent,
     vkDestroyShaderModule(device, frag, NULL);
 }
 
+void vulkan_framebuffers(VkDevice device, size_t image_count,
+                         VkImageView *image_views, VkRenderPass renderpass,
+                         VkExtent2D extent,
+                         VkFramebuffer **frame_buffers) {
+    VkFramebuffer *fbs = malloc(image_count*sizeof(*fbs));
+
+    for (int i = 0; i < image_count; i++) {
+        VkFramebufferCreateInfo create_info = {
+            .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
+            .renderPass = renderpass,
+            .attachmentCount = 1,
+            .pAttachments = &image_views[i],
+            .width = extent.width,
+            .height = extent.height,
+            .layers = 1
+        };
+        if (vkCreateFramebuffer(device, &create_info, NULL, &fbs[i])
+                != VK_SUCCESS)
+            die("failed to create framebuffer %d", i);
+    }
+
+    *frame_buffers = fbs;
+}
+
+void vulkan_cmdpool(VkDevice device, VkCommandPool *pool) {
+    VkCommandPoolCreateInfo create_info = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+        .queueFamilyIndex = 0
+    };
+
+    if (vkCreateCommandPool(device, &create_info, NULL, pool) != VK_SUCCESS)
+        die("failed to create command pool");
+}
+
+void vulkan_cmdbuffers(VkDevice device, size_t image_count,
+                       VkRenderPass renderpass, VkPipeline pipeline,
+                       VkExtent2D extent, VkFramebuffer *frame_buffers,
+                       VkCommandPool pool, VkCommandBuffer **command_buffers) {
+    VkCommandBuffer *cbs = malloc(image_count*sizeof(*cbs));
+
+    VkCommandBufferAllocateInfo alloc_info = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .commandPool = pool,
+        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        .commandBufferCount = image_count,
+    };
+    if (vkAllocateCommandBuffers(device, &alloc_info, cbs) != VK_SUCCESS)
+        die("failed to allocate command buffers");
+
+    for (size_t i = 0; i < image_count; i++) {
+        VkCommandBufferBeginInfo cb_begin_info = {
+            .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+            .flags = VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT,
+            .pInheritanceInfo = NULL,
+        };
+        if (vkBeginCommandBuffer(cbs[i], &cb_begin_info) != VK_SUCCESS)
+            die("failed to begin recording command buffer %d", i);
+
+        VkClearValue clear_color = {
+            .color = {
+                .float32 = {0, 0, 0, 0}
+            }
+        };
+        VkRenderPassBeginInfo rp_begin_info = {
+            .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+            .renderPass = renderpass,
+            .framebuffer = frame_buffers[i],
+            .renderArea = { .offset = {0,0}, .extent = extent },
+            .clearValueCount = 1,
+            .pClearValues = &clear_color
+        };
+        vkCmdBeginRenderPass(cbs[i], &rp_begin_info,
+                             VK_SUBPASS_CONTENTS_INLINE);
+
+        vkCmdBindPipeline(cbs[i], VK_PIPELINE_BIND_POINT_GRAPHICS,
+                          pipeline);
+        vkCmdDraw(cbs[i], 3, 1, 0, 0);
+
+        vkCmdEndRenderPass(cbs[i]);
+
+        if (vkEndCommandBuffer(cbs[i]) != VK_SUCCESS)
+            die("failed to record to command buffer");
+    }
+
+    *command_buffers = cbs;
+}
+
+void vulkan_semaphores(VkDevice device,
+                       VkSemaphore *img_available, VkSemaphore *img_rendered) {
+    VkSemaphoreCreateInfo create_info = {
+        .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO
+    };
+    
+    if (vkCreateSemaphore(device, &create_info, NULL, img_available)
+            != VK_SUCCESS)
+        die("failed to create avail semaphore");
+    if (vkCreateSemaphore(device, &create_info, NULL, img_rendered)
+            != VK_SUCCESS)
+        die("failed to create render semaphore");
+}
+
 void render_init(struct render_handles *rh) {
     if (SDL_Init(SDL_INIT_VIDEO) != 0)
         die("failed to initialize sdl");
@@ -494,13 +641,8 @@ void render_init(struct render_handles *rh) {
 
     vulkan_instance(rh->window, &rh->instance);
     vulkan_physical(rh->instance, &rh->physical);
-    vulkan_logical(rh->physical, &rh->device);
-    vkGetDeviceQueue(rh->device, 0, 0, &rh->queue);
-
-    if (!SDL_Vulkan_CreateSurface(rh->window, rh->instance, &rh->surface)) {
-        die("failed to create vulkan surface for sdl");
-    }
-
+    vulkan_logical(rh->instance, rh->physical, rh->window,
+                   &rh->surface, &rh->device, &rh->queue);
     vulkan_swapchain(rh->physical, rh->device, rh->surface,
                      &rh->format, &rh->sc_extent, &rh->sc);
     vulkan_imageviews(rh->device, rh->sc, rh->format,
@@ -509,9 +651,22 @@ void render_init(struct render_handles *rh) {
     vulkan_pipeline(rh->device, rh->sc_extent,
                     rh->renderpass,
                     &rh->layout, &rh->pipeline);
+    vulkan_framebuffers(rh->device, rh->sc_imgc, rh->sc_ivs,
+                        rh->renderpass, rh->sc_extent, &rh->sc_fbs);
+    vulkan_cmdpool(rh->device, &rh->cmdpool);
+    vulkan_cmdbuffers(rh->device, rh->sc_imgc, rh->renderpass, rh->pipeline,
+                      rh->sc_extent, rh->sc_fbs, rh->cmdpool, &rh->sc_cbs);
+    vulkan_semaphores(rh->device, &rh->img_available, &rh->img_rendered);
 }
 
 void render_destroy(struct render_handles *rh) {
+    vkDeviceWaitIdle(rh->device);
+    vkDestroySemaphore(rh->device, rh->img_available, NULL);
+    vkDestroySemaphore(rh->device, rh->img_rendered, NULL);
+    vkDestroyCommandPool(rh->device, rh->cmdpool, NULL);
+    for (int i = 0; i < rh->sc_imgc; i++) {
+        vkDestroyFramebuffer(rh->device, rh->sc_fbs[i], NULL);
+    }
     vkDestroyPipeline(rh->device, rh->pipeline, NULL);
     vkDestroyPipelineLayout(rh->device, rh->layout, NULL);
     vkDestroyRenderPass(rh->device, rh->renderpass, NULL);
@@ -523,6 +678,41 @@ void render_destroy(struct render_handles *rh) {
     vkDestroySurfaceKHR(rh->instance, rh->surface, NULL);
     vkDestroyInstance(rh->instance, NULL);
     SDL_DestroyWindow(rh->window);
+}
+
+void render_draw(struct render_handles *rh) {
+    uint32_t image_index;
+    vkAcquireNextImageKHR(rh->device, rh->sc, 5e9,
+                          rh->img_available,
+                          VK_NULL_HANDLE, &image_index);
+
+    VkPipelineStageFlags wait_stages[] =
+        {VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
+    VkSubmitInfo submit_info = {
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .waitSemaphoreCount = 1,
+        .pWaitSemaphores = &rh->img_available,
+        .pWaitDstStageMask = wait_stages,
+        .commandBufferCount = 1,
+        .pCommandBuffers = &rh->sc_cbs[image_index],
+        .signalSemaphoreCount = 1,
+        .pSignalSemaphores = &rh->img_rendered,
+    };
+
+    if (vkQueueSubmit(rh->queue, 1, &submit_info, VK_NULL_HANDLE) != VK_SUCCESS)
+        die("failed to submit draw command buffer");
+
+    VkPresentInfoKHR present_info = {
+        .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+        .waitSemaphoreCount = 1,
+        .pWaitSemaphores = &rh->img_rendered,
+        .swapchainCount = 1,
+        .pSwapchains = &rh->sc,
+        .pImageIndices = &image_index,
+        .pResults = NULL,
+    };
+
+    vkQueuePresentKHR(rh->queue, &present_info);
 }
 
 int main(void) {
@@ -539,6 +729,8 @@ int main(void) {
                 break;
             }
         }
+
+        render_draw(&rh);
     }
 
     render_destroy(&rh);
