@@ -57,7 +57,8 @@ void vulkan_instance(SDL_Window *window, VkInstance *instance) {
     
     unsigned int extc_sdl;
     if (!SDL_Vulkan_GetInstanceExtensions(window, &extc_sdl, NULL))
-        die("failed to get instance extension count for sdl");
+        die("failed to get instance extension count for sdl -- %s",
+            SDL_GetError());
 
     const char *ext_static[] = {
         VK_EXT_DEBUG_UTILS_EXTENSION_NAME,
@@ -69,7 +70,8 @@ void vulkan_instance(SDL_Window *window, VkInstance *instance) {
         ext[i] = ext_static[i];
     }
     if (!SDL_Vulkan_GetInstanceExtensions(window, &extc_sdl, ext+extc_static))
-        die("failed to get %d instance extensions for sdl", extc);
+        die("failed to get %d instance extensions for sdl -- %s",
+            extc, SDL_GetError());
 
     printf("enabled extensions: ");
     for (int i = 0; i < extc; i++) {
@@ -188,7 +190,7 @@ void vulkan_logical(VkInstance instance, VkPhysicalDevice physical,
     vkGetDeviceQueue(*device, family_index, queue_index, queue);
 
     if (!SDL_Vulkan_CreateSurface(window, instance, surface)) {
-        die("failed to create vulkan surface for sdl");
+        die("failed to create vulkan surface for sdl -- %s", SDL_GetError());
     }
 
     VkBool32 surface_supported;
@@ -631,13 +633,13 @@ void vulkan_semaphores(VkDevice device,
 
 void render_init(struct render_handles *rh) {
     if (SDL_Init(SDL_INIT_VIDEO) != 0)
-        die("failed to initialize sdl");
+        die("failed to initialize sdl -- %s", SDL_GetError());
 
     rh->window = SDL_CreateWindow(APP_NAME,
         SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
         800, 600, SDL_WINDOW_RESIZABLE|SDL_WINDOW_VULKAN);
     if (!rh->window)
-        die("failed to create sdl window");
+        die("failed to create sdl window -- %s", SDL_GetError());
 
     vulkan_instance(rh->window, &rh->instance);
     vulkan_physical(rh->instance, &rh->physical);
