@@ -24,6 +24,8 @@ struct render_handles {
     VkCommandPool cmdpool;
     VkBuffer vertex_buffer;
     VkDeviceMemory vertex_buffer_mem;
+    VkBuffer index_buffer;
+    VkDeviceMemory index_buffer_mem;
 
     VkSwapchainKHR sc;
     VkExtent2D sc_extent;
@@ -57,18 +59,25 @@ struct vertex {
 };
 
 const struct vertex VERTICES[] = {
-    {{0,0}, {1,0,0,0.5}},
-    {{0.5,0.7}, {0,0,0,0.5}},
-    {{0.7,0.5}, {0,0,0,0.5}},
-    {{0,0}, {0,1,0,0.5}},
-    {{-0.5,-0.7}, {0,0,0,0.5}},
-    {{-0.7,-0.5}, {0,0,0,0.5}},
-    {{0,0}, {0,0,1,0.5}},
-    {{0.5,-0.7}, {0,0,0,0.5}},
-    {{0.7,-0.5}, {0,0,0,0.5}},
-    {{0.5,-0.5}, {1,1,1,0.5}},
-    {{-0.5,0.7}, {0,0,0,0.5}},
-    {{-0.7,0.5}, {0,0,0,0.5}},
+    {{0,0}, {0,0,0,0.5}},
+    {{0.5,0.7}, {0,1,0,0.5}},
+    {{0.7,0.5}, {0,1,0,0.5}},
+    {{-0.5,-0.7}, {0,0,1,0.5}},
+    {{-0.7,-0.5}, {0,0,1,0.5}},
+    {{0.5,-0.7}, {1,0,0,0.5}},
+    {{0.7,-0.5}, {1,0,0,0.5}},
+    {{-0.5,0.7}, {1,1,0,0.5}},
+    {{-0.7,0.5}, {1,1,0,0.5}},
+    {{-0.5,-0.7}, {1,1,1,0.5}},
+    {{0.5,-0.7}, {1,1,1,0.5}},
+};
+
+const uint16_t INDICES[] = {
+    0, 1, 2,
+    0, 3, 4,
+    0, 5, 6,
+    0, 7, 8,
+    0, 9, 10,
 };
 
 void vulkan_instance(SDL_Window *window, VkInstance *instance) {
@@ -240,11 +249,6 @@ void vulkan_swapchain(VkPhysicalDevice physical, VkDevice device,
     vkGetPhysicalDeviceSurfaceFormatsKHR(physical, surface, &fmtc, NULL);
     VkSurfaceFormatKHR *fmts = malloc(fmtc*sizeof(*fmts));
     vkGetPhysicalDeviceSurfaceFormatsKHR(physical, surface, &fmtc, fmts);
-    printf("%d formats:", fmtc);
-    for (int i = 0; i < fmtc; i++) {
-        printf(" %d", fmts[i].format);
-    }
-    printf("\n");
     *format = fmts[0].format;
     free(fmts);
 
@@ -295,7 +299,6 @@ void vulkan_imageviews(VkDevice device, VkSwapchainKHR swapchain,
     VkImage *imgs = malloc(imgc*sizeof(VkImage));
     VkImageView *ivs = malloc(imgc*sizeof(VkImageView));
     vkGetSwapchainImagesKHR(device, swapchain, &imgc, imgs);
-    printf("Swap chain image count: %d\n", imgc);
 
     VkComponentMapping components = {
         .r = VK_COMPONENT_SWIZZLE_IDENTITY,
@@ -733,9 +736,42 @@ void vulkan_vertexbuffer(VkDevice device, VkPhysicalDevice physical,
     vkFreeMemory(device, staging_buffer_mem, NULL);
 }
 
+void vulkan_indexbuffer(VkDevice device, VkPhysicalDevice physical,
+                        VkQueue queue,
+                        VkBuffer *buffer, VkDeviceMemory *buffer_mem) {
+    size_t buffer_size = sizeof(INDICES);
+
+    VkBuffer staging_buffer;
+    VkDeviceMemory staging_buffer_mem;
+    VkBufferUsageFlags staging_usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    VkMemoryPropertyFlagBits staging_props =
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+        VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    vulkan_buffer_create(device, physical, buffer_size,
+                         staging_usage, staging_props,
+                         &staging_buffer, &staging_buffer_mem);
+
+    void *data;
+    vkMapMemory(device, staging_buffer_mem, 0, buffer_size, 0, &data);
+    memcpy(data, INDICES, buffer_size);
+    vkUnmapMemory(device, staging_buffer_mem);
+
+    VkBufferUsageFlags usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                               VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+    VkMemoryPropertyFlags props = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    vulkan_buffer_create(device, physical, buffer_size, usage, props,
+                         buffer, buffer_mem);
+
+    vulkan_buffer_copy(device, queue, *buffer, staging_buffer, buffer_size);
+
+    vkDestroyBuffer(device, staging_buffer, NULL);
+    vkFreeMemory(device, staging_buffer_mem, NULL);
+}
+
 void vulkan_cmdbuffers(VkDevice device, size_t image_count,
                        VkRenderPass renderpass, VkPipeline pipeline,
-                       VkExtent2D extent, VkBuffer vertex_buffer,
+                       VkExtent2D extent,
+                       VkBuffer vertex_buffer, VkBuffer index_buffer,
                        VkFramebuffer *frame_buffers,
                        VkCommandPool pool, VkCommandBuffer **command_buffers) {
     VkCommandBuffer *cbs = malloc(image_count*sizeof(*cbs));
@@ -776,11 +812,15 @@ void vulkan_cmdbuffers(VkDevice device, size_t image_count,
 
         vkCmdBindPipeline(cbs[i], VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
 
-        VkBuffer buffers[] = {vertex_buffer};
+        VkBuffer vertex_buffers[] = {vertex_buffer};
         VkDeviceSize offsets[] = {0};
-        vkCmdBindVertexBuffers(cbs[i], 0, 1, buffers, offsets);
+        vkCmdBindVertexBuffers(cbs[i], 0, 1, vertex_buffers, offsets);
 
-        vkCmdDraw(cbs[i], sizeof(VERTICES)/sizeof(*VERTICES), 1, 0, 0);
+        vkCmdBindIndexBuffer(cbs[i], index_buffer, 0, VK_INDEX_TYPE_UINT16);
+
+        vkCmdDrawIndexed(cbs[i],
+                         sizeof(INDICES)/sizeof(*INDICES),
+                         1, 0, 0, 0);
 
         vkCmdEndRenderPass(cbs[i]);
 
@@ -838,8 +878,9 @@ void render_swapchain_create(struct render_handles *rh) {
                         rh->renderpass, rh->sc_extent,
                         &rh->sc_fbs);
     vulkan_cmdbuffers(rh->device, rh->sc_imgc, rh->renderpass, rh->pipeline,
-                      rh->sc_extent, rh->vertex_buffer, rh->sc_fbs,
-                      rh->cmdpool,
+                      rh->sc_extent,
+                      rh->vertex_buffer, rh->index_buffer,
+                      rh->sc_fbs, rh->cmdpool,
                       &rh->sc_cbs);
 }
 
@@ -884,6 +925,8 @@ void render_init(struct render_handles *rh) {
                    &rh->cmdpool);
     vulkan_vertexbuffer(rh->device, rh->physical, rh->queue,
                         &rh->vertex_buffer, &rh->vertex_buffer_mem);
+    vulkan_indexbuffer(rh->device, rh->physical, rh->queue,
+                       &rh->index_buffer, &rh->index_buffer_mem);
     render_swapchain_create(rh);
     vulkan_synchronization(rh->device, rh->sc_imgc,
                            &rh->img_available,
@@ -902,6 +945,8 @@ void render_destroy(struct render_handles *rh) {
         vkDestroySemaphore(rh->device, rh->img_rendered[i], NULL);
     }
 
+    vkDestroyBuffer(rh->device, rh->index_buffer, NULL);
+    vkFreeMemory(rh->device, rh->index_buffer_mem, NULL);
     vkDestroyBuffer(rh->device, rh->vertex_buffer, NULL);
     vkFreeMemory(rh->device, rh->vertex_buffer_mem, NULL);
     vkDestroyCommandPool(rh->device, rh->cmdpool, NULL);
