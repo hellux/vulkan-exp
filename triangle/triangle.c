@@ -53,13 +53,22 @@ void die(const char *fmt, ...) {
 
 struct vertex {
     float pos[2];
-    float col[3];
+    float col[4];
 };
 
 const struct vertex VERTICES[] = {
-    {{-0.7,-.9}, {.5,1,0}},
-    {{0.7,0.7}, {1,0,.5}},
-    {{-0.3,.7}, {.5,.5,0}},
+    {{0,0}, {1,0,0,0.5}},
+    {{0.5,0.7}, {0,0,0,0.5}},
+    {{0.7,0.5}, {0,0,0,0.5}},
+    {{0,0}, {0,1,0,0.5}},
+    {{-0.5,-0.7}, {0,0,0,0.5}},
+    {{-0.7,-0.5}, {0,0,0,0.5}},
+    {{0,0}, {0,0,1,0.5}},
+    {{0.5,-0.7}, {0,0,0,0.5}},
+    {{0.7,-0.5}, {0,0,0,0.5}},
+    {{0.5,-0.5}, {1,1,1,0.5}},
+    {{-0.5,0.7}, {0,0,0,0.5}},
+    {{-0.7,0.5}, {0,0,0,0.5}},
 };
 
 void vulkan_instance(SDL_Window *window, VkInstance *instance) {
@@ -183,7 +192,9 @@ void vulkan_logical(VkInstance instance, VkPhysicalDevice physical,
         .pQueuePriorities = prios,
     };
 
-    VkPhysicalDeviceFeatures features = {0};
+    VkPhysicalDeviceFeatures features = {
+        .logicOp = VK_TRUE
+    };
     const char *ext[] = {
         VK_KHR_SWAPCHAIN_EXTENSION_NAME,
     };
@@ -433,7 +444,7 @@ void vulkan_pipeline(VkDevice device, VkExtent2D extent,
         {
             .binding = 0,
             .location = 1,
-            .format = VK_FORMAT_R32G32B32_SFLOAT,
+            .format = VK_FORMAT_R32G32B32A32_SFLOAT,
             .offset = offsetof(struct vertex, col)
         }
     };
@@ -478,7 +489,7 @@ void vulkan_pipeline(VkDevice device, VkExtent2D extent,
         .depthClampEnable = VK_FALSE,
         .rasterizerDiscardEnable = VK_FALSE,
         .polygonMode = VK_POLYGON_MODE_FILL,
-        .cullMode = VK_CULL_MODE_BACK_BIT,
+        .cullMode = VK_CULL_MODE_NONE,
         .frontFace = VK_FRONT_FACE_CLOCKWISE,
         .depthBiasEnable = VK_FALSE,
         .depthBiasConstantFactor = 0,
@@ -498,9 +509,9 @@ void vulkan_pipeline(VkDevice device, VkExtent2D extent,
     };
 
     VkPipelineColorBlendAttachmentState blend_attachment = {
-        .blendEnable = VK_FALSE,
-        .srcColorBlendFactor = VK_BLEND_FACTOR_ONE,
-        .dstColorBlendFactor = VK_BLEND_FACTOR_ZERO,
+        .blendEnable = VK_TRUE,
+        .srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA,
+        .dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
         .colorBlendOp = VK_BLEND_OP_ADD,
         .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,
         .dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO,
@@ -511,10 +522,10 @@ void vulkan_pipeline(VkDevice device, VkExtent2D extent,
 
     VkPipelineColorBlendStateCreateInfo blending = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
-        .logicOpEnable = VK_FALSE,
+        .logicOpEnable = VK_TRUE,
         .logicOp = VK_LOGIC_OP_COPY,
         .attachmentCount = 1,
-        .pAttachments = & blend_attachment,
+        .pAttachments = &blend_attachment,
         .blendConstants = {0,0,0,0}
     };
 
@@ -701,7 +712,7 @@ void vulkan_cmdbuffers(VkDevice device, size_t image_count,
         VkDeviceSize offsets[] = {0};
         vkCmdBindVertexBuffers(cbs[i], 0, 1, buffers, offsets);
 
-        vkCmdDraw(cbs[i], 3, 1, 0, 0);
+        vkCmdDraw(cbs[i], sizeof(VERTICES)/sizeof(*VERTICES), 1, 0, 0);
 
         vkCmdEndRenderPass(cbs[i]);
 
