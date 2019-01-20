@@ -22,6 +22,8 @@ struct render_handles {
     VkPipelineLayout layout;
     VkPipeline pipeline;
     VkCommandPool cmdpool;
+    VkBuffer vertex_buffer;
+    VkDeviceMemory vertex_buffer_mem;
 
     VkSwapchainKHR sc;
     VkExtent2D sc_extent;
@@ -32,8 +34,8 @@ struct render_handles {
     VkCommandBuffer *sc_cbs;
     VkSemaphore *img_available;
     VkSemaphore *img_rendered;
-    VkFence frm_inflight[CONCURRENT_FRAMES];
 
+    VkFence frm_inflight[CONCURRENT_FRAMES];
     size_t frm_index;
 };
 
@@ -48,6 +50,17 @@ void die(const char *fmt, ...) {
 
     exit(1);
 }
+
+struct vertex {
+    float pos[2];
+    float col[3];
+};
+
+const struct vertex VERTICES[] = {
+    {{-0.7,-.9}, {.5,1,0}},
+    {{0.7,0.7}, {1,0,.5}},
+    {{-0.3,.7}, {.5,.5,0}},
+};
 
 void vulkan_instance(SDL_Window *window, VkInstance *instance) {
     VkApplicationInfo app_info = {
@@ -224,6 +237,20 @@ void vulkan_swapchain(VkPhysicalDevice physical, VkDevice device,
     *format = fmts[0].format;
     free(fmts);
 
+    uint32_t pmodec;
+    vkGetPhysicalDeviceSurfacePresentModesKHR(physical, surface,
+                                              &pmodec, NULL);
+    VkPresentModeKHR *pmodes = malloc(pmodec*sizeof(*pmodes));
+    vkGetPhysicalDeviceSurfacePresentModesKHR(physical, surface,
+                                              &pmodec, pmodes);
+    int mailbox_exists = 0;
+    for (int i = 0; i < pmodec; i++) {
+        if (pmodes[i] == VK_PRESENT_MODE_MAILBOX_KHR)
+            mailbox_exists = 1;
+    }
+    if (mailbox_exists == 0)
+        die("mail box present mode not available for physical device");
+
     VkSwapchainCreateInfoKHR create_info = {
         .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
         .surface = surface,
@@ -390,12 +417,34 @@ void vulkan_pipeline(VkDevice device, VkExtent2D extent,
         }
     };
 
+    VkVertexInputBindingDescription bind_desc = {
+        .binding = 0,
+        .stride = sizeof(struct vertex),
+        .inputRate = VK_VERTEX_INPUT_RATE_VERTEX
+    };
+
+    VkVertexInputAttributeDescription attr_descs[] = {
+        {
+            .binding = 0,
+            .location = 0,
+            .format = VK_FORMAT_R32G32_SFLOAT,
+            .offset = offsetof(struct vertex, pos)
+        },
+        {
+            .binding = 0,
+            .location = 1,
+            .format = VK_FORMAT_R32G32B32_SFLOAT,
+            .offset = offsetof(struct vertex, col)
+        }
+    };
+
     VkPipelineVertexInputStateCreateInfo vertex_input = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-        .vertexBindingDescriptionCount = 0,
-        .pVertexBindingDescriptions = NULL,
-        .vertexAttributeDescriptionCount = 0,
-        .pVertexAttributeDescriptions = NULL
+        .vertexBindingDescriptionCount = 1,
+        .pVertexBindingDescriptions = &bind_desc,
+        .vertexAttributeDescriptionCount =
+            sizeof(attr_descs)/sizeof(*attr_descs),
+        .pVertexAttributeDescriptions = attr_descs
     };
 
     VkPipelineInputAssemblyStateCreateInfo input_assembly = {
@@ -553,9 +602,62 @@ void vulkan_cmdpool(VkDevice device, VkCommandPool *pool) {
         die("failed to create command pool");
 }
 
+void vulkan_vertexbuffer(VkDevice device, VkPhysicalDevice physical,
+                         VkBuffer *buffer, VkDeviceMemory *buffer_mem) {
+    size_t buffer_size = sizeof(VERTICES);
+    VkBufferCreateInfo create_info = {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .size = buffer_size,
+        .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+        .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+    };
+    if (vkCreateBuffer(device, &create_info, NULL, buffer) != VK_SUCCESS)
+        die("failed to create vertex buffer");
+
+    VkMemoryRequirements mem_reqs;
+    vkGetBufferMemoryRequirements(device, *buffer, &mem_reqs);
+
+    VkPhysicalDeviceMemoryProperties mem_props;
+    vkGetPhysicalDeviceMemoryProperties(physical, &mem_props);
+
+    VkMemoryPropertyFlagBits props = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                     VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    uint32_t mem_index = -1;
+    for (uint32_t i = 0; i < mem_props.memoryTypeCount; i++) {
+        if (~mem_reqs.memoryTypeBits & (1 << i))
+            continue;
+        if ((mem_props.memoryTypes[i].propertyFlags & props) != props)
+            continue;
+
+        mem_index = i;
+        break;
+    }
+    if (mem_index < 0)
+        die("failed to find compatible memory type");
+
+    printf("selected memory index %d: props %x\n", mem_index,
+           mem_props.memoryTypes[mem_index].propertyFlags);
+
+    VkMemoryAllocateInfo alloc_info = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+        .allocationSize = mem_reqs.size,
+        .memoryTypeIndex = mem_index
+    };
+    if (vkAllocateMemory(device, &alloc_info, NULL, buffer_mem) != VK_SUCCESS)
+        die("failed to allocate memory for vertex buffer");
+
+    vkBindBufferMemory(device, *buffer, *buffer_mem, 0);
+
+    void *data;
+    vkMapMemory(device, *buffer_mem, 0, buffer_size, 0, &data);
+    memcpy(data, VERTICES, buffer_size);
+    vkUnmapMemory(device, *buffer_mem);
+}
+
 void vulkan_cmdbuffers(VkDevice device, size_t image_count,
                        VkRenderPass renderpass, VkPipeline pipeline,
-                       VkExtent2D extent, VkFramebuffer *frame_buffers,
+                       VkExtent2D extent, VkBuffer vertex_buffer,
+                       VkFramebuffer *frame_buffers,
                        VkCommandPool pool, VkCommandBuffer **command_buffers) {
     VkCommandBuffer *cbs = malloc(image_count*sizeof(*cbs));
 
@@ -593,8 +695,12 @@ void vulkan_cmdbuffers(VkDevice device, size_t image_count,
         vkCmdBeginRenderPass(cbs[i], &rp_begin_info,
                              VK_SUBPASS_CONTENTS_INLINE);
 
-        vkCmdBindPipeline(cbs[i], VK_PIPELINE_BIND_POINT_GRAPHICS,
-                          pipeline);
+        vkCmdBindPipeline(cbs[i], VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+
+        VkBuffer buffers[] = {vertex_buffer};
+        VkDeviceSize offsets[] = {0};
+        vkCmdBindVertexBuffers(cbs[i], 0, 1, buffers, offsets);
+
         vkCmdDraw(cbs[i], 3, 1, 0, 0);
 
         vkCmdEndRenderPass(cbs[i]);
@@ -653,7 +759,8 @@ void render_swapchain_create(struct render_handles *rh) {
                         rh->renderpass, rh->sc_extent,
                         &rh->sc_fbs);
     vulkan_cmdbuffers(rh->device, rh->sc_imgc, rh->renderpass, rh->pipeline,
-                      rh->sc_extent, rh->sc_fbs, rh->cmdpool,
+                      rh->sc_extent, rh->vertex_buffer, rh->sc_fbs,
+                      rh->cmdpool,
                       &rh->sc_cbs);
 }
 
@@ -696,6 +803,8 @@ void render_init(struct render_handles *rh) {
                    &rh->surface, &rh->device, &rh->queue);
     vulkan_cmdpool(rh->device,
                    &rh->cmdpool);
+    vulkan_vertexbuffer(rh->device, rh->physical,
+                        &rh->vertex_buffer, &rh->vertex_buffer_mem);
     render_swapchain_create(rh);
     vulkan_synchronization(rh->device, rh->sc_imgc,
                            &rh->img_available,
@@ -714,6 +823,8 @@ void render_destroy(struct render_handles *rh) {
         vkDestroySemaphore(rh->device, rh->img_rendered[i], NULL);
     }
 
+    vkDestroyBuffer(rh->device, rh->vertex_buffer, NULL);
+    vkFreeMemory(rh->device, rh->vertex_buffer_mem, NULL);
     vkDestroyCommandPool(rh->device, rh->cmdpool, NULL);
     vkDestroyDevice(rh->device, NULL);
     vkDestroySurfaceKHR(rh->instance, rh->surface, NULL);
