@@ -613,13 +613,14 @@ void vulkan_cmdpool(VkDevice device, VkCommandPool *pool) {
         die("failed to create command pool");
 }
 
-void vulkan_vertexbuffer(VkDevice device, VkPhysicalDevice physical,
-                         VkBuffer *buffer, VkDeviceMemory *buffer_mem) {
-    size_t buffer_size = sizeof(VERTICES);
+void vulkan_buffer_create(VkDevice device, VkPhysicalDevice physical,
+                          VkDeviceSize size, VkBufferUsageFlags usage,
+                          VkMemoryPropertyFlags props,
+                          VkBuffer *buffer, VkDeviceMemory *buffer_mem) {
     VkBufferCreateInfo create_info = {
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-        .size = buffer_size,
-        .usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+        .size = size,
+        .usage = usage,
         .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
     };
     if (vkCreateBuffer(device, &create_info, NULL, buffer) != VK_SUCCESS)
@@ -627,12 +628,9 @@ void vulkan_vertexbuffer(VkDevice device, VkPhysicalDevice physical,
 
     VkMemoryRequirements mem_reqs;
     vkGetBufferMemoryRequirements(device, *buffer, &mem_reqs);
-
     VkPhysicalDeviceMemoryProperties mem_props;
     vkGetPhysicalDeviceMemoryProperties(physical, &mem_props);
 
-    VkMemoryPropertyFlagBits props = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                                     VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
     uint32_t mem_index = -1;
     for (uint32_t i = 0; i < mem_props.memoryTypeCount; i++) {
         if (~mem_reqs.memoryTypeBits & (1 << i))
@@ -646,9 +644,6 @@ void vulkan_vertexbuffer(VkDevice device, VkPhysicalDevice physical,
     if (mem_index < 0)
         die("failed to find compatible memory type");
 
-    printf("selected memory index %d: props %x\n", mem_index,
-           mem_props.memoryTypes[mem_index].propertyFlags);
-
     VkMemoryAllocateInfo alloc_info = {
         .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
         .allocationSize = mem_reqs.size,
@@ -658,11 +653,84 @@ void vulkan_vertexbuffer(VkDevice device, VkPhysicalDevice physical,
         die("failed to allocate memory for vertex buffer");
 
     vkBindBufferMemory(device, *buffer, *buffer_mem, 0);
+}
+
+void vulkan_buffer_copy(VkDevice device, VkQueue queue,
+                        VkBuffer dst, VkBuffer src, VkDeviceSize size) {
+    VkCommandPoolCreateInfo pool_info = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+        .flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,
+        .queueFamilyIndex = 0
+    };
+    VkCommandPool pool;
+    if (vkCreateCommandPool(device, &pool_info, NULL, &pool) != VK_SUCCESS)
+        die("failed to create transient command pool during copy");
+
+    VkCommandBufferAllocateInfo alloc_info = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+        .commandPool = pool,
+        .commandBufferCount = 1
+    };
+
+    VkCommandBuffer cmdbuffer;
+    vkAllocateCommandBuffers(device, &alloc_info, &cmdbuffer);
+    VkCommandBufferBeginInfo begin_info = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT
+    };
+    vkBeginCommandBuffer(cmdbuffer, &begin_info);
+
+    VkBufferCopy copy_region = {
+        .srcOffset = 0,
+        .dstOffset = 0,
+        .size = size
+    };
+    vkCmdCopyBuffer(cmdbuffer, src, dst, 1, &copy_region);
+    vkEndCommandBuffer(cmdbuffer);
+
+    VkSubmitInfo submit_info = {
+        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+        .commandBufferCount = 1,
+        .pCommandBuffers = &cmdbuffer
+    };
+    vkQueueSubmit(queue, 1, &submit_info, VK_NULL_HANDLE);
+    vkQueueWaitIdle(queue);
+
+    vkFreeCommandBuffers(device, pool, 1, &cmdbuffer);
+    vkDestroyCommandPool(device, pool, NULL);
+}
+
+void vulkan_vertexbuffer(VkDevice device, VkPhysicalDevice physical,
+                         VkQueue queue,
+                         VkBuffer *buffer, VkDeviceMemory *buffer_mem) {
+    size_t buffer_size = sizeof(VERTICES);
+
+    VkBuffer staging_buffer;
+    VkDeviceMemory staging_buffer_mem;
+    VkBufferUsageFlags staging_usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    VkMemoryPropertyFlagBits staging_props =
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+        VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    vulkan_buffer_create(device, physical, buffer_size,
+                         staging_usage, staging_props,
+                         &staging_buffer, &staging_buffer_mem);
 
     void *data;
-    vkMapMemory(device, *buffer_mem, 0, buffer_size, 0, &data);
+    vkMapMemory(device, staging_buffer_mem, 0, buffer_size, 0, &data);
     memcpy(data, VERTICES, buffer_size);
-    vkUnmapMemory(device, *buffer_mem);
+    vkUnmapMemory(device, staging_buffer_mem);
+
+    VkBufferUsageFlags usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                               VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+    VkMemoryPropertyFlags props = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    vulkan_buffer_create(device, physical, buffer_size, usage, props,
+                         buffer, buffer_mem);
+
+    vulkan_buffer_copy(device, queue, *buffer, staging_buffer, buffer_size);
+
+    vkDestroyBuffer(device, staging_buffer, NULL);
+    vkFreeMemory(device, staging_buffer_mem, NULL);
 }
 
 void vulkan_cmdbuffers(VkDevice device, size_t image_count,
@@ -814,7 +882,7 @@ void render_init(struct render_handles *rh) {
                    &rh->surface, &rh->device, &rh->queue);
     vulkan_cmdpool(rh->device,
                    &rh->cmdpool);
-    vulkan_vertexbuffer(rh->device, rh->physical,
+    vulkan_vertexbuffer(rh->device, rh->physical, rh->queue,
                         &rh->vertex_buffer, &rh->vertex_buffer_mem);
     render_swapchain_create(rh);
     vulkan_synchronization(rh->device, rh->sc_imgc,
