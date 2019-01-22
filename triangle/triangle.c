@@ -6,9 +6,12 @@
 #include <SDL2/SDL_vulkan.h>
 #include <vulkan/vulkan.h>
 
+#include <math.h>
+
 #define APP_NAME "VULKAN_TEST"
 
 #define CONCURRENT_FRAMES 3
+#define FOV 1.0
 
 struct render_handles {
     SDL_Window *window;
@@ -19,21 +22,27 @@ struct render_handles {
     VkQueue queue; /* gfx and present, assumed to be the same */
     VkFormat format;
     VkRenderPass renderpass;
-    VkPipelineLayout layout;
+    VkDescriptorSetLayout descset_layout;
+    VkPipelineLayout pipeline_layout;
     VkPipeline pipeline;
+    VkDescriptorPool descpool;
     VkCommandPool cmdpool;
-    VkBuffer vertex_buffer;
-    VkDeviceMemory vertex_buffer_mem;
-    VkBuffer index_buffer;
-    VkDeviceMemory index_buffer_mem;
+    VkBuffer vertex_buf;
+    VkDeviceMemory vertex_buf_mem;
+    VkBuffer index_buf;
+    VkDeviceMemory index_buf_mem;
 
     VkSwapchainKHR sc;
     VkExtent2D sc_extent;
     uint32_t sc_imgc;
     VkImage *sc_imgs;
-    VkImageView *sc_ivs;
-    VkFramebuffer *sc_fbs;
-    VkCommandBuffer *sc_cbs;
+    VkImageView *sc_imageviews;
+    VkFramebuffer *sc_framebufs;
+    VkCommandBuffer *sc_cmdbufs;
+    VkBuffer *sc_uniform_bufs;
+    VkDeviceMemory *sc_uniform_bufs_mem;
+    VkDescriptorSet *sc_descsets;
+
     VkSemaphore *img_available;
     VkSemaphore *img_rendered;
 
@@ -53,9 +62,14 @@ void die(const char *fmt, ...) {
     exit(1);
 }
 
+typedef float mat4[4][4];
+typedef float vec2[2];
+typedef float vec4[4];
+typedef float vec3[3];
+
 struct vertex {
-    float pos[2];
-    float col[4];
+    vec2 pos;
+    vec4 col;
 };
 
 const struct vertex VERTICES[] = {
@@ -78,6 +92,12 @@ const uint16_t INDICES[] = {
     0, 5, 6,
     0, 7, 8,
     0, 9, 10,
+};
+
+struct uniform_buf_obj {
+    mat4 model;
+    mat4 view;
+    mat4 proj;
 };
 
 void vulkan_instance(SDL_Window *window, VkInstance *instance) {
@@ -263,6 +283,7 @@ void vulkan_swapchain(VkPhysicalDevice physical, VkDevice device,
         if (pmodes[i] == VK_PRESENT_MODE_MAILBOX_KHR)
             mailbox_exists = 1;
     }
+    free(pmodes);
     if (mailbox_exists == 0)
         die("mail box present mode not available for physical device");
 
@@ -409,6 +430,7 @@ void vulkan_shader_module(VkDevice device, const char *path,
 
 void vulkan_pipeline(VkDevice device, VkExtent2D extent,
                      VkRenderPass renderpass,
+                     VkDescriptorSetLayout descset_layout,
                      VkPipelineLayout *layout, VkPipeline *pipeline) {
     VkShaderModule vert, frag;
     vulkan_shader_module(device, "triangle/shader.vert.spv", &vert);
@@ -546,8 +568,8 @@ void vulkan_pipeline(VkDevice device, VkExtent2D extent,
 
     VkPipelineLayoutCreateInfo layout_info = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-        .setLayoutCount = 0,
-        .pSetLayouts = NULL,
+        .setLayoutCount = 1,
+        .pSetLayouts = &descset_layout,
         .pushConstantRangeCount = 0,
         .pPushConstantRanges = NULL
     };
@@ -582,10 +604,10 @@ void vulkan_pipeline(VkDevice device, VkExtent2D extent,
     vkDestroyShaderModule(device, frag, NULL);
 }
 
-void vulkan_framebuffers(VkDevice device, size_t image_count,
+void vulkan_framebufs(VkDevice device, size_t image_count,
                          VkImageView *image_views, VkRenderPass renderpass,
                          VkExtent2D extent,
-                         VkFramebuffer **frame_buffers) {
+                         VkFramebuffer **frame_bufs) {
     VkFramebuffer *fbs = malloc(image_count*sizeof(*fbs));
 
     for (int i = 0; i < image_count; i++) {
@@ -603,7 +625,7 @@ void vulkan_framebuffers(VkDevice device, size_t image_count,
             die("failed to create framebuffer %d", i);
     }
 
-    *frame_buffers = fbs;
+    *frame_bufs = fbs;
 }
 
 void vulkan_cmdpool(VkDevice device, VkCommandPool *pool) {
@@ -676,104 +698,208 @@ void vulkan_buffer_copy(VkDevice device, VkQueue queue,
         .commandBufferCount = 1
     };
 
-    VkCommandBuffer cmdbuffer;
-    vkAllocateCommandBuffers(device, &alloc_info, &cmdbuffer);
+    VkCommandBuffer cmdbuf;
+    vkAllocateCommandBuffers(device, &alloc_info, &cmdbuf);
     VkCommandBufferBeginInfo begin_info = {
         .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
         .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT
     };
-    vkBeginCommandBuffer(cmdbuffer, &begin_info);
+    vkBeginCommandBuffer(cmdbuf, &begin_info);
 
     VkBufferCopy copy_region = {
         .srcOffset = 0,
         .dstOffset = 0,
         .size = size
     };
-    vkCmdCopyBuffer(cmdbuffer, src, dst, 1, &copy_region);
-    vkEndCommandBuffer(cmdbuffer);
+    vkCmdCopyBuffer(cmdbuf, src, dst, 1, &copy_region);
+    vkEndCommandBuffer(cmdbuf);
 
     VkSubmitInfo submit_info = {
         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
         .commandBufferCount = 1,
-        .pCommandBuffers = &cmdbuffer
+        .pCommandBuffers = &cmdbuf
     };
     vkQueueSubmit(queue, 1, &submit_info, VK_NULL_HANDLE);
     vkQueueWaitIdle(queue);
 
-    vkFreeCommandBuffers(device, pool, 1, &cmdbuffer);
+    vkFreeCommandBuffers(device, pool, 1, &cmdbuf);
     vkDestroyCommandPool(device, pool, NULL);
 }
 
-void vulkan_vertexbuffer(VkDevice device, VkPhysicalDevice physical,
-                         VkQueue queue,
-                         VkBuffer *buffer, VkDeviceMemory *buffer_mem) {
-    size_t buffer_size = sizeof(VERTICES);
+void vulkan_vertexbuf(VkDevice device, VkPhysicalDevice physical,
+                      VkQueue queue,
+                      VkBuffer *buf, VkDeviceMemory *buf_mem) {
+    size_t buf_size = sizeof(VERTICES);
 
-    VkBuffer staging_buffer;
-    VkDeviceMemory staging_buffer_mem;
+    VkBuffer staging_buf;
+    VkDeviceMemory staging_buf_mem;
     VkBufferUsageFlags staging_usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
     VkMemoryPropertyFlagBits staging_props =
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
         VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-    vulkan_buffer_create(device, physical, buffer_size,
+    vulkan_buffer_create(device, physical, buf_size,
                          staging_usage, staging_props,
-                         &staging_buffer, &staging_buffer_mem);
+                         &staging_buf, &staging_buf_mem);
 
     void *data;
-    vkMapMemory(device, staging_buffer_mem, 0, buffer_size, 0, &data);
-    memcpy(data, VERTICES, buffer_size);
-    vkUnmapMemory(device, staging_buffer_mem);
+    vkMapMemory(device, staging_buf_mem, 0, buf_size, 0, &data);
+    memcpy(data, VERTICES, buf_size);
+    vkUnmapMemory(device, staging_buf_mem);
 
     VkBufferUsageFlags usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT |
                                VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
     VkMemoryPropertyFlags props = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-    vulkan_buffer_create(device, physical, buffer_size, usage, props,
-                         buffer, buffer_mem);
+    vulkan_buffer_create(device, physical, buf_size, usage, props,
+                         buf, buf_mem);
 
-    vulkan_buffer_copy(device, queue, *buffer, staging_buffer, buffer_size);
+    vulkan_buffer_copy(device, queue, *buf, staging_buf, buf_size);
 
-    vkDestroyBuffer(device, staging_buffer, NULL);
-    vkFreeMemory(device, staging_buffer_mem, NULL);
+    vkDestroyBuffer(device, staging_buf, NULL);
+    vkFreeMemory(device, staging_buf_mem, NULL);
 }
 
-void vulkan_indexbuffer(VkDevice device, VkPhysicalDevice physical,
-                        VkQueue queue,
-                        VkBuffer *buffer, VkDeviceMemory *buffer_mem) {
-    size_t buffer_size = sizeof(INDICES);
+void vulkan_indexbuf(VkDevice device, VkPhysicalDevice physical,
+                     VkQueue queue,
+                     VkBuffer *buf, VkDeviceMemory *buf_mem) {
+    size_t buf_size = sizeof(INDICES);
 
-    VkBuffer staging_buffer;
-    VkDeviceMemory staging_buffer_mem;
+    VkBuffer staging_buf;
+    VkDeviceMemory staging_buf_mem;
     VkBufferUsageFlags staging_usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
     VkMemoryPropertyFlagBits staging_props =
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
         VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-    vulkan_buffer_create(device, physical, buffer_size,
+    vulkan_buffer_create(device, physical, buf_size,
                          staging_usage, staging_props,
-                         &staging_buffer, &staging_buffer_mem);
+                         &staging_buf, &staging_buf_mem);
 
     void *data;
-    vkMapMemory(device, staging_buffer_mem, 0, buffer_size, 0, &data);
-    memcpy(data, INDICES, buffer_size);
-    vkUnmapMemory(device, staging_buffer_mem);
+    vkMapMemory(device, staging_buf_mem, 0, buf_size, 0, &data);
+    memcpy(data, INDICES, buf_size);
+    vkUnmapMemory(device, staging_buf_mem);
 
     VkBufferUsageFlags usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT |
                                VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
     VkMemoryPropertyFlags props = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-    vulkan_buffer_create(device, physical, buffer_size, usage, props,
-                         buffer, buffer_mem);
+    vulkan_buffer_create(device, physical, buf_size, usage, props,
+                         buf, buf_mem);
 
-    vulkan_buffer_copy(device, queue, *buffer, staging_buffer, buffer_size);
+    vulkan_buffer_copy(device, queue, *buf, staging_buf, buf_size);
 
-    vkDestroyBuffer(device, staging_buffer, NULL);
-    vkFreeMemory(device, staging_buffer_mem, NULL);
+    vkDestroyBuffer(device, staging_buf, NULL);
+    vkFreeMemory(device, staging_buf_mem, NULL);
 }
 
-void vulkan_cmdbuffers(VkDevice device, size_t image_count,
-                       VkRenderPass renderpass, VkPipeline pipeline,
-                       VkExtent2D extent,
-                       VkBuffer vertex_buffer, VkBuffer index_buffer,
-                       VkFramebuffer *frame_buffers,
-                       VkCommandPool pool, VkCommandBuffer **command_buffers) {
+void vulkan_descpool(VkDevice device, size_t image_count,
+                           VkDescriptorPool *pool) {
+    VkDescriptorPoolSize pool_size = {
+        .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+        .descriptorCount = image_count
+    };
+
+    VkDescriptorPoolCreateInfo pool_info = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+        .poolSizeCount = 1,
+        .pPoolSizes = &pool_size,
+        .maxSets = image_count,
+    };
+
+    if (vkCreateDescriptorPool(device, &pool_info, NULL, pool) != VK_SUCCESS)
+        die("failed to create desc pool");
+}
+
+void vulkan_descsets(VkDevice device, size_t image_count,
+                     VkDescriptorPool pool, VkDescriptorSetLayout layout,
+                     VkBuffer *uniform_bufs,
+                     VkDescriptorSet **descsets) {
+    VkDescriptorSetLayout *layouts = malloc(image_count*sizeof(*layouts));
+    for (int i = 0; i < image_count; i++) {
+        layouts[i] = layout;
+    }
+
+    VkDescriptorSetAllocateInfo alloc_info = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+        .descriptorPool = pool,
+        .descriptorSetCount = image_count,
+        .pSetLayouts = layouts
+    };
+    VkDescriptorSet *sets = malloc(image_count*sizeof(*sets));
+    if (vkAllocateDescriptorSets(device, &alloc_info, sets) != VK_SUCCESS)
+        die("failed to allocate descriptor sets");
+    free(layouts);
+
+    for (int i = 0; i < image_count; i++) {
+        VkDescriptorBufferInfo buf_info = {
+            .buffer = uniform_bufs[i],
+            .offset = 0,
+            .range = VK_WHOLE_SIZE,
+        };
+        VkWriteDescriptorSet desc_write = {
+            .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstSet = sets[i],
+            .dstBinding = 0,
+            .dstArrayElement = 0,
+            .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            .descriptorCount = 1,
+            .pBufferInfo = &buf_info,
+            .pImageInfo = NULL,
+            .pTexelBufferView = NULL,
+        };
+        vkUpdateDescriptorSets(device, 1, &desc_write, 0, NULL);
+    }
+
+    *descsets = sets;
+}
+
+void vulkan_uniformbufs(VkDevice device, VkPhysicalDevice physical,
+                        uint32_t image_count,
+                        VkBuffer **uniform_bufs,
+                        VkDeviceMemory **uniform_bufs_mem) {
+    size_t buf_size = sizeof(struct uniform_buf_obj);
+    VkBuffer *bufs = malloc(image_count*sizeof(*bufs));
+    VkDeviceMemory *bufs_mem = malloc(image_count*sizeof(*bufs_mem));
+
+    VkBufferUsageFlags usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+    VkMemoryPropertyFlags props = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                  VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+
+    for (size_t i = 0; i < image_count; i++) {
+        /* XXX merge to one buffer with offsets? */
+        vulkan_buffer_create(device, physical, buf_size, usage, props,
+                             &bufs[i], &bufs_mem[i]);
+    }
+
+    *uniform_bufs = bufs;
+    *uniform_bufs_mem = bufs_mem;
+}
+
+void vulkan_descsetlayout(VkDevice device,
+                                VkDescriptorSetLayout *layout) {
+    VkDescriptorSetLayoutBinding binding = {
+        .binding = 0,
+        .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+        .descriptorCount = 1,
+        .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
+        .pImmutableSamplers = NULL,
+    };
+    
+    VkDescriptorSetLayoutCreateInfo layout_info = {
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+        .bindingCount = 1,
+        .pBindings = &binding
+    };
+    if (vkCreateDescriptorSetLayout(device, &layout_info, NULL, layout))
+        die("failed to create desc set layout");
+}
+
+void vulkan_cmdbufs(VkDevice device, size_t image_count,
+                    VkRenderPass renderpass, VkPipeline pipeline,
+                    VkPipelineLayout pipeline_layout,
+                    VkExtent2D extent,
+                    VkBuffer vertex_buf, VkBuffer index_buf,
+                    VkFramebuffer *frame_bufs, VkCommandPool pool,
+                    VkDescriptorSet *descsets,
+                    VkCommandBuffer **command_bufs) {
     VkCommandBuffer *cbs = malloc(image_count*sizeof(*cbs));
 
     VkCommandBufferAllocateInfo alloc_info = {
@@ -783,7 +909,7 @@ void vulkan_cmdbuffers(VkDevice device, size_t image_count,
         .commandBufferCount = image_count,
     };
     if (vkAllocateCommandBuffers(device, &alloc_info, cbs) != VK_SUCCESS)
-        die("failed to allocate command buffers");
+        die("failed to allocate command bufs");
 
     for (size_t i = 0; i < image_count; i++) {
         VkCommandBufferBeginInfo cb_begin_info = {
@@ -802,7 +928,7 @@ void vulkan_cmdbuffers(VkDevice device, size_t image_count,
         VkRenderPassBeginInfo rp_begin_info = {
             .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
             .renderPass = renderpass,
-            .framebuffer = frame_buffers[i],
+            .framebuffer = frame_bufs[i],
             .renderArea = { .offset = {0,0}, .extent = extent },
             .clearValueCount = 1,
             .pClearValues = &clear_color
@@ -812,11 +938,15 @@ void vulkan_cmdbuffers(VkDevice device, size_t image_count,
 
         vkCmdBindPipeline(cbs[i], VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
 
-        VkBuffer vertex_buffers[] = {vertex_buffer};
+        VkBuffer vertex_bufs[] = {vertex_buf};
         VkDeviceSize offsets[] = {0};
-        vkCmdBindVertexBuffers(cbs[i], 0, 1, vertex_buffers, offsets);
+        vkCmdBindVertexBuffers(cbs[i], 0, 1, vertex_bufs, offsets);
 
-        vkCmdBindIndexBuffer(cbs[i], index_buffer, 0, VK_INDEX_TYPE_UINT16);
+        vkCmdBindIndexBuffer(cbs[i], index_buf, 0, VK_INDEX_TYPE_UINT16);
+
+        vkCmdBindDescriptorSets(cbs[i], VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                pipeline_layout, 0, 1,
+                                &descsets[i], 0, NULL);
 
         vkCmdDrawIndexed(cbs[i],
                          sizeof(INDICES)/sizeof(*INDICES),
@@ -828,7 +958,7 @@ void vulkan_cmdbuffers(VkDevice device, size_t image_count,
             die("failed to record to command buffer");
     }
 
-    *command_buffers = cbs;
+    *command_bufs = cbs;
 }
 
 void vulkan_synchronization(VkDevice device, size_t image_count,
@@ -869,35 +999,57 @@ void render_swapchain_create(struct render_handles *rh) {
     vulkan_swapchain(rh->physical, rh->device, rh->surface,
                      &rh->format, &rh->sc_extent, &rh->sc);
     vulkan_imageviews(rh->device, rh->sc, rh->format,
-                      &rh->sc_imgc, &rh->sc_imgs, &rh->sc_ivs);
+                      &rh->sc_imgc, &rh->sc_imgs, &rh->sc_imageviews);
     vulkan_renderpass(rh->device, rh->format,
                       &rh->renderpass);
     vulkan_pipeline(rh->device, rh->sc_extent, rh->renderpass,
-                    &rh->layout, &rh->pipeline);
-    vulkan_framebuffers(rh->device, rh->sc_imgc, rh->sc_ivs,
-                        rh->renderpass, rh->sc_extent,
-                        &rh->sc_fbs);
-    vulkan_cmdbuffers(rh->device, rh->sc_imgc, rh->renderpass, rh->pipeline,
-                      rh->sc_extent,
-                      rh->vertex_buffer, rh->index_buffer,
-                      rh->sc_fbs, rh->cmdpool,
-                      &rh->sc_cbs);
+                    rh->descset_layout,
+                    &rh->pipeline_layout, &rh->pipeline);
+    vulkan_framebufs(rh->device, rh->sc_imgc, rh->sc_imageviews,
+                     rh->renderpass, rh->sc_extent,
+                     &rh->sc_framebufs);
+    vulkan_uniformbufs(rh->device, rh->physical, rh->sc_imgc,
+                       &rh->sc_uniform_bufs, &rh->sc_uniform_bufs_mem);
+    vulkan_descpool(rh->device, rh->sc_imgc,
+                    &rh->descpool);
+    vulkan_descsets(rh->device, rh->sc_imgc, rh->descpool,
+                    rh->descset_layout, rh->sc_uniform_bufs,
+                    &rh->sc_descsets);
+    vulkan_cmdbufs(rh->device, rh->sc_imgc, rh->renderpass, rh->pipeline,
+                   rh->pipeline_layout, rh->sc_extent,
+                   rh->vertex_buf, rh->index_buf,
+                   rh->sc_framebufs, rh->cmdpool, rh->sc_descsets,
+                   &rh->sc_cmdbufs);
 }
 
 void render_swapchain_destroy(struct render_handles *rh) {
     vkDeviceWaitIdle(rh->device);
 
-    vkFreeCommandBuffers(rh->device, rh->cmdpool, rh->sc_imgc, rh->sc_cbs);
+    vkDestroyDescriptorPool(rh->device, rh->descpool, NULL);
+
     for (int i = 0; i < rh->sc_imgc; i++) {
-        vkDestroyFramebuffer(rh->device, rh->sc_fbs[i], NULL);
+        vkDestroyBuffer(rh->device, rh->sc_uniform_bufs[i], NULL);
+        vkFreeMemory(rh->device, rh->sc_uniform_bufs_mem[i], NULL);
     }
+    free(rh->sc_uniform_bufs);
+    free(rh->sc_uniform_bufs_mem);
+
+    vkFreeCommandBuffers(rh->device, rh->cmdpool, rh->sc_imgc, rh->sc_cmdbufs);
+    for (int i = 0; i < rh->sc_imgc; i++) {
+        vkDestroyFramebuffer(rh->device, rh->sc_framebufs[i], NULL);
+    }
+    free(rh->sc_framebufs);
     vkDestroyPipeline(rh->device, rh->pipeline, NULL);
-    vkDestroyPipelineLayout(rh->device, rh->layout, NULL);
+    vkDestroyPipelineLayout(rh->device, rh->pipeline_layout, NULL);
     vkDestroyRenderPass(rh->device, rh->renderpass, NULL);
     for (int i = 0; i < rh->sc_imgc; i++) {
-        vkDestroyImageView(rh->device, rh->sc_ivs[i], NULL);
+        vkDestroyImageView(rh->device, rh->sc_imageviews[i], NULL);
     }
+    free(rh->sc_imageviews);
     vkDestroySwapchainKHR(rh->device, rh->sc, NULL);
+
+    free(rh->sc_imgs);
+    free(rh->sc_cmdbufs);
 }
 
 void render_swapchain_recreate(struct render_handles *rh) {
@@ -923,10 +1075,12 @@ void render_init(struct render_handles *rh) {
                    &rh->surface, &rh->device, &rh->queue);
     vulkan_cmdpool(rh->device,
                    &rh->cmdpool);
-    vulkan_vertexbuffer(rh->device, rh->physical, rh->queue,
-                        &rh->vertex_buffer, &rh->vertex_buffer_mem);
-    vulkan_indexbuffer(rh->device, rh->physical, rh->queue,
-                       &rh->index_buffer, &rh->index_buffer_mem);
+    vulkan_vertexbuf(rh->device, rh->physical, rh->queue,
+                     &rh->vertex_buf, &rh->vertex_buf_mem);
+    vulkan_indexbuf(rh->device, rh->physical, rh->queue,
+                    &rh->index_buf, &rh->index_buf_mem);
+    vulkan_descsetlayout(rh->device,
+                         &rh->descset_layout);
     render_swapchain_create(rh);
     vulkan_synchronization(rh->device, rh->sc_imgc,
                            &rh->img_available,
@@ -937,6 +1091,8 @@ void render_init(struct render_handles *rh) {
 void render_destroy(struct render_handles *rh) {
     render_swapchain_destroy(rh);
 
+    vkDestroyDescriptorSetLayout(rh->device, rh->descset_layout, NULL);
+
     for (int i = 0; i < CONCURRENT_FRAMES; i++) {
         vkDestroyFence(rh->device, rh->frm_inflight[i], NULL);
     }
@@ -944,22 +1100,133 @@ void render_destroy(struct render_handles *rh) {
         vkDestroySemaphore(rh->device, rh->img_available[i], NULL);
         vkDestroySemaphore(rh->device, rh->img_rendered[i], NULL);
     }
-
-    vkDestroyBuffer(rh->device, rh->index_buffer, NULL);
-    vkFreeMemory(rh->device, rh->index_buffer_mem, NULL);
-    vkDestroyBuffer(rh->device, rh->vertex_buffer, NULL);
-    vkFreeMemory(rh->device, rh->vertex_buffer_mem, NULL);
+    vkDestroyBuffer(rh->device, rh->index_buf, NULL);
+    vkFreeMemory(rh->device, rh->index_buf_mem, NULL);
+    vkDestroyBuffer(rh->device, rh->vertex_buf, NULL);
+    vkFreeMemory(rh->device, rh->vertex_buf_mem, NULL);
     vkDestroyCommandPool(rh->device, rh->cmdpool, NULL);
     vkDestroyDevice(rh->device, NULL);
     vkDestroySurfaceKHR(rh->instance, rh->surface, NULL);
     vkDestroyInstance(rh->instance, NULL);
     SDL_DestroyWindow(rh->window);
 
-    free(rh->sc_imgs);
-    free(rh->sc_fbs);
-    free(rh->sc_cbs);
     free(rh->img_available);
     free(rh->img_rendered);
+}
+
+void render_rotate(mat4 mat, float ang) {
+    
+}
+
+/*
+mat4 *perspective(float angle, float ratio, float near, float far) {
+    mat4 *mat;
+    to_return = mat_new(4, 4);
+    mat_zero(to_return);
+    tan_half_angle = tan(angle / 2);
+    mat_set(to_return, 1, 1, 1 / (ratio * tan_half_angle));
+    mat_set(to_return, 2, 2, 1 / (tan_half_angle));
+    mat_set(to_return, 3, 3, -(far + near) / (far - near));
+    mat_set(to_return, 4, 3, -1);
+    mat_set(to_return, 3, 4, -(2 * far * near) / (far - near));
+    return (to_return);
+}
+*/
+
+void cross(vec3 product, vec3 a, vec3 b) {
+    product[0] = a[1]*b[2] - a[2]*b[1];
+    product[1] = a[2]*b[0] - a[0]*b[2];
+    product[2] = a[0]*b[1] - a[1]*b[0];
+}
+
+void subtract(vec3 c, vec3 a, vec3 b) {
+    c[0] = a[0]-b[0];
+    c[1] = a[1]-b[1];
+    c[2] = a[2]-b[2];
+}
+
+float dot(vec3 a, vec3 b) {
+    return a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
+}
+
+void normalize(vec3 normal, vec3 vec) {
+    float length = sqrt(dot(vec, vec));
+    normal[0] = vec[0]/length;
+    normal[1] = vec[1]/length;
+    normal[2] = vec[2]/length;
+}
+
+void look_at(mat4 mat, vec3 eye, vec3 center, vec3 up) {
+    vec3 e, f;
+    subtract(e, center, eye);
+    normalize(f, e);
+
+    vec3 r, s;
+    cross(r, f, up);
+    normalize(s, r);
+
+    vec3 u;
+    cross(u, s, f);
+
+    mat[0][0] = s[0];
+    mat[0][1] = u[0];
+    mat[0][2] =-f[0];
+    mat[1][0] = s[1];
+    mat[1][1] = u[1];
+    mat[1][2] =-f[1];
+    mat[2][1] = u[2];
+    mat[2][0] = s[2];
+    mat[2][2] =-f[2];
+    mat[3][0] =-dot(s, eye);
+    mat[3][1] =-dot(u, eye);
+    mat[3][2] = dot(f, eye);
+}
+
+void perspective(mat4 mat, float fov, float aspect,
+                           float near, float far) {
+    mat[0][0] = 1 / aspect / tan(fov/2);
+    mat[0][1] = 0;
+    mat[0][2] = 0;
+    mat[0][3] = 0;
+    mat[1][0] = 0;
+    mat[1][1] = 1 / tan(fov/2);
+    mat[1][2] = 0;
+    mat[1][3] = 0;
+    mat[2][0] = 0;
+    mat[2][1] = 0;
+    mat[2][2] = (far + near) / (near - far);
+    mat[2][3] = -1;
+    mat[3][0] = 0;
+    mat[3][1] = 0;
+    mat[3][2] = 2*(far * near) / (near - far);
+    mat[3][3] = 0;
+}
+
+void render_ubo_update(struct render_handles *rh, uint32_t img_index) {
+    struct uniform_buf_obj ubo = {
+        .model = {{1,0,0,0},
+                  {0,1,0,0},
+                  {0,0,1,0},
+                  {0,0,0,1}},
+        .view = {{1,0,0,0},
+                  {0,1,0,0},
+                  {0,0,1,0},
+                  {0,0,0,1}},
+        .proj = {{1,0,0,0},
+                  {0,1,0,0},
+                  {0,0,1,0},
+                  {0,0,0,1}},
+    };
+    vec3 eye = {2,2,2};
+    vec3 center = {0,0,0};
+    vec3 up = {0,0,1};
+    look_at(ubo.view, eye, center, up);
+    perspective(ubo.proj, FOV, 1, 0.1, 10);
+    void *data;
+    vkMapMemory(rh->device, rh->sc_uniform_bufs_mem[img_index],
+                0, sizeof(ubo), 0, &data);
+    memcpy(data, &ubo, sizeof(ubo));
+    vkUnmapMemory(rh->device, rh->sc_uniform_bufs_mem[img_index]);
 }
 
 void render_draw(struct render_handles *rh) {
@@ -974,6 +1241,7 @@ void render_draw(struct render_handles *rh) {
         render_swapchain_recreate(rh);
         return;
     }
+    render_ubo_update(rh, img_index);
 
     vkResetFences(rh->device, 1, &rh->frm_inflight[rh->frm_index]);
 
@@ -985,7 +1253,7 @@ void render_draw(struct render_handles *rh) {
         .pWaitSemaphores = &rh->img_available[rh->frm_index],
         .pWaitDstStageMask = wait_stages,
         .commandBufferCount = 1,
-        .pCommandBuffers = &rh->sc_cbs[img_index],
+        .pCommandBuffers = &rh->sc_cmdbufs[img_index],
         .signalSemaphoreCount = 1,
         .pSignalSemaphores = &rh->img_rendered[rh->frm_index],
     };
