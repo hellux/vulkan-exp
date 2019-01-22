@@ -2,11 +2,14 @@
 #include <stdio.h>
 #include <stdbool.h>
 
+#include <math.h>
+#include <time.h>
+#include <unistd.h>
+
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_vulkan.h>
 #include <vulkan/vulkan.h>
 
-#include <math.h>
 
 #define APP_NAME "VULKAN_TEST"
 
@@ -1114,25 +1117,6 @@ void render_destroy(struct render_handles *rh) {
     free(rh->img_rendered);
 }
 
-void render_rotate(mat4 mat, float ang) {
-    
-}
-
-/*
-mat4 *perspective(float angle, float ratio, float near, float far) {
-    mat4 *mat;
-    to_return = mat_new(4, 4);
-    mat_zero(to_return);
-    tan_half_angle = tan(angle / 2);
-    mat_set(to_return, 1, 1, 1 / (ratio * tan_half_angle));
-    mat_set(to_return, 2, 2, 1 / (tan_half_angle));
-    mat_set(to_return, 3, 3, -(far + near) / (far - near));
-    mat_set(to_return, 4, 3, -1);
-    mat_set(to_return, 3, 4, -(2 * far * near) / (far - near));
-    return (to_return);
-}
-*/
-
 void cross(vec3 product, vec3 a, vec3 b) {
     product[0] = a[1]*b[2] - a[2]*b[1];
     product[1] = a[2]*b[0] - a[0]*b[2];
@@ -1189,7 +1173,7 @@ void perspective(mat4 mat, float fov, float aspect,
     mat[0][2] = 0;
     mat[0][3] = 0;
     mat[1][0] = 0;
-    mat[1][1] = 1 / tan(fov/2);
+    mat[1][1] = -1 / tan(fov/2);
     mat[1][2] = 0;
     mat[1][3] = 0;
     mat[2][0] = 0;
@@ -1203,9 +1187,12 @@ void perspective(mat4 mat, float fov, float aspect,
 }
 
 void render_ubo_update(struct render_handles *rh, uint32_t img_index) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    float angle = 2*3.14*((float) ts.tv_nsec / 1e9);
     struct uniform_buf_obj ubo = {
-        .model = {{1,0,0,0},
-                  {0,1,0,0},
+        .model = {{cos(angle),-sin(angle),0,0},
+                  {sin(angle),cos(angle),0,0},
                   {0,0,1,0},
                   {0,0,0,1}},
         .view = {{1,0,0,0},
@@ -1221,7 +1208,9 @@ void render_ubo_update(struct render_handles *rh, uint32_t img_index) {
     vec3 center = {0,0,0};
     vec3 up = {0,0,1};
     look_at(ubo.view, eye, center, up);
-    perspective(ubo.proj, FOV, 1, 0.1, 10);
+    perspective(ubo.proj, FOV,
+                (float)rh->sc_extent.width/rh->sc_extent.height,
+                0, 10);
     void *data;
     vkMapMemory(rh->device, rh->sc_uniform_bufs_mem[img_index],
                 0, sizeof(ubo), 0, &data);
