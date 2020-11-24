@@ -14,3 +14,7 @@ cgmath = "0.17.0"
 [[bin]]
 name = "triangle"
 path = "triangle/triangle.rs"
+
+[[bin]]
+name = "obj"
+path = "obj/main.rs"

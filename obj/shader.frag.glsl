@@ -1,0 +1,14 @@
+#version 450
+#extension GL_ARB_separate_shader_objects : enable
+
+layout(location = 0) in vec3 v_normal;
+
+layout(location = 0) out vec4 col_out;
+
+const vec3 SOURCE = vec3(0.0, 1.0, 1.0);
+const vec3 COLOR = vec3(1.0, 1.0, 1.0);
+
+void main() {
+    float brightness = dot(normalize(v_normal), normalize(SOURCE));
+    col_out = vec4(mix(0.3*COLOR, COLOR, brightness), 1.0);
+}
