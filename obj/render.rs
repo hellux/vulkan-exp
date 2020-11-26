@@ -57,7 +57,7 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    pub fn new(el: &EventLoop<()>) -> Self {
+    pub fn new(el: &EventLoop<()>, obj: Obj) -> Self {
         let instance =
             Instance::new(None, &vulkano_win::required_extensions(), None)
                 .unwrap();
@@ -110,7 +110,7 @@ impl Renderer {
             logical.clone(),
             BufferUsage::all(),
             false,
-            std::iter::empty(),
+            obj.vertices.iter().cloned(),
         )
         .unwrap();
 
@@ -118,21 +118,33 @@ impl Renderer {
             logical.clone(),
             BufferUsage::all(),
             false,
-            std::iter::empty(),
+            obj.indices.iter().cloned(),
         )
         .unwrap();
 
-        let img: Vec<u8> = Vec::from([255, 255, 255, 255]);
-        let (texture, tex_future) = ImmutableImage::from_iter(
-            img.iter().cloned(),
-            Dimensions::Dim2d {
-                width: 1,
-                height: 1,
-            },
-            swapchain.format(),
-            queue.clone(),
-        )
-        .unwrap();
+        let (texture, tex_future) = if let Some(texture) = obj.texture {
+            let buf = texture.into_bgra8();
+            let (width, height) = (buf.width(), buf.height());
+            ImmutableImage::from_iter(
+                buf.into_raw().iter().cloned(),
+                Dimensions::Dim2d { width, height },
+                swapchain.format(),
+                queue.clone(),
+            )
+            .unwrap()
+        } else {
+            let img: Vec<u8> = Vec::from([255, 255, 255, 255]);
+            ImmutableImage::from_iter(
+                img.iter().cloned(),
+                Dimensions::Dim2d {
+                    width: 1,
+                    height: 1,
+                },
+                swapchain.format(),
+                queue.clone(),
+            )
+            .unwrap()
+        };
 
         let sampler = Sampler::simple_repeat_linear_no_mipmap(logical.clone());
 
@@ -160,38 +172,6 @@ impl Renderer {
 
     pub fn swapchain_outdated(&mut self) {
         self.swapchain_outdated = true;
-    }
-
-    pub fn load_to_buffers(&mut self, obj: Obj) {
-        self.vertex_buffer = CpuAccessibleBuffer::from_iter(
-            self.logical.clone(),
-            BufferUsage::all(),
-            false,
-            obj.vertices.iter().cloned(),
-        )
-        .unwrap();
-
-        self.index_buffer = CpuAccessibleBuffer::from_iter(
-            self.logical.clone(),
-            BufferUsage::all(),
-            false,
-            obj.indices.iter().cloned(),
-        )
-        .unwrap();
-
-        if let Some(texture) = obj.texture {
-            let buf = texture.into_bgra8();
-            let (width, height) = (buf.width(), buf.height());
-            let (texture, tex_future) = ImmutableImage::from_iter(
-                buf.into_raw().iter().cloned(),
-                Dimensions::Dim2d { width, height },
-                self.swapchain.format(),
-                self.queue.clone(),
-            )
-            .unwrap();
-            self.texture = texture;
-            self.previous_frame_end = Some(tex_future.boxed());
-        }
     }
 
     pub fn redraw(&mut self) {

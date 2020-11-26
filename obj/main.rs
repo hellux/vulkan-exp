@@ -23,8 +23,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let obj = Obj::new(obj_file, texture)?;
 
     let el = EventLoop::new();
-    let mut r = Renderer::new(&el);
-    r.load_to_buffers(obj);
+    let mut r = Renderer::new(&el, obj);
 
     el.run(move |event, _, control_flow| match event {
         Event::WindowEvent {
