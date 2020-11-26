@@ -31,7 +31,7 @@ use vulkano::sync::{FlushError, GpuFuture};
 
 use cgmath::{Matrix4, Point3, Rad, Vector3};
 
-use crate::types::{UniformBufferObject, Vertex};
+use crate::types::{Obj, UniformBufferObject, Vertex};
 
 pub struct Renderer {
     surface: Arc<Surface<Window>>,
@@ -162,17 +162,12 @@ impl Renderer {
         self.swapchain_outdated = true;
     }
 
-    pub fn load_to_buffers(
-        &mut self,
-        vertices: Vec<Vertex>,
-        indices: Vec<u32>,
-        texture: Option<image::DynamicImage>,
-    ) {
+    pub fn load_to_buffers(&mut self, obj: Obj) {
         self.vertex_buffer = CpuAccessibleBuffer::from_iter(
             self.logical.clone(),
             BufferUsage::all(),
             false,
-            vertices.iter().cloned(),
+            obj.vertices.iter().cloned(),
         )
         .unwrap();
 
@@ -180,11 +175,11 @@ impl Renderer {
             self.logical.clone(),
             BufferUsage::all(),
             false,
-            indices.iter().cloned(),
+            obj.indices.iter().cloned(),
         )
         .unwrap();
 
-        if let Some(texture) = texture {
+        if let Some(texture) = obj.texture {
             let buf = texture.into_bgra8();
             let (width, height) = (buf.width(), buf.height());
             let (texture, tex_future) = ImmutableImage::from_iter(
