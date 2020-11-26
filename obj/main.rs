@@ -18,10 +18,12 @@ use vulkano::framebuffer::{
     Framebuffer, FramebufferAbstract, RenderPassAbstract, Subpass,
 };
 use vulkano::image::attachment::AttachmentImage;
-use vulkano::image::{ImageUsage, SwapchainImage};
+use vulkano::image::immutable::ImmutableImage;
+use vulkano::image::{Dimensions, ImageUsage, SwapchainImage};
 use vulkano::instance::{Instance, PhysicalDevice};
 use vulkano::pipeline::viewport::Viewport;
 use vulkano::pipeline::{GraphicsPipeline, GraphicsPipelineAbstract};
+use vulkano::sampler::Sampler;
 use vulkano::swapchain::{
     AcquireError, ColorSpace, FullscreenExclusive, PresentMode, Surface,
     SurfaceTransform, Swapchain,
@@ -33,9 +35,10 @@ use cgmath::{Matrix4, Point3, Rad, Vector3};
 #[derive(Default, Copy, Clone)]
 struct Vertex {
     pos: [f32; 3],
+    texture: [f32; 2],
     normal: [f32; 3],
 }
-vulkano::impl_vertex!(Vertex, pos, normal);
+vulkano::impl_vertex!(Vertex, pos, texture, normal);
 
 #[allow(dead_code)] // read by GPU
 struct UniformBufferObject {
@@ -56,10 +59,12 @@ struct Renderer {
 
     vertex_shader: vs::Shader,
     frag_shader: fs::Shader,
+    sampler: Arc<Sampler>,
 
     uniform_buffer: CpuBufferPool<UniformBufferObject>,
     vertex_buffer: Arc<CpuAccessibleBuffer<[Vertex]>>,
     index_buffer: Arc<CpuAccessibleBuffer<[u32]>>,
+    texture: Arc<ImmutableImage<Format>>,
 
     swapchain_outdated: bool,
     previous_frame_end: Option<Box<dyn GpuFuture>>,
@@ -131,8 +136,21 @@ impl Renderer {
         )
         .unwrap();
 
-        let previous_frame_end =
-            Some(vulkano::sync::now(logical.clone()).boxed());
+        let img: Vec<u8> = Vec::from([255, 255, 255, 255]);
+        let (texture, tex_future) = ImmutableImage::from_iter(
+            img.iter().cloned(),
+            Dimensions::Dim2d {
+                width: 1,
+                height: 1,
+            },
+            swapchain.format(),
+            queue.clone(),
+        )
+        .unwrap();
+
+        let sampler = Sampler::simple_repeat_linear_no_mipmap(logical.clone());
+
+        let previous_frame_end = Some(tex_future.boxed());
 
         Renderer {
             surface,
@@ -144,15 +162,22 @@ impl Renderer {
             framebuffers,
             vertex_shader,
             frag_shader,
+            sampler,
             uniform_buffer,
             vertex_buffer,
             index_buffer,
+            texture,
             swapchain_outdated: false,
             previous_frame_end,
         }
     }
 
-    fn load_to_buffers(&mut self, vertices: Vec<Vertex>, indices: Vec<u32>) {
+    fn load_to_buffers(
+        &mut self,
+        vertices: Vec<Vertex>,
+        indices: Vec<u32>,
+        texture: Option<image::DynamicImage>,
+    ) {
         self.vertex_buffer = CpuAccessibleBuffer::from_iter(
             self.logical.clone(),
             BufferUsage::all(),
@@ -168,6 +193,20 @@ impl Renderer {
             indices.iter().cloned(),
         )
         .unwrap();
+
+        if let Some(texture) = texture {
+            let buf = texture.into_bgra8();
+            let (width, height) = (buf.width(), buf.height());
+            let (texture, tex_future) = ImmutableImage::from_iter(
+                buf.into_raw().iter().cloned(),
+                Dimensions::Dim2d { width, height },
+                self.swapchain.format(),
+                self.queue.clone(),
+            )
+            .unwrap();
+            self.texture = texture;
+            self.previous_frame_end = Some(tex_future.boxed());
+        }
     }
 
     fn create_logical(
@@ -204,7 +243,7 @@ impl Renderer {
     ) -> (Arc<Swapchain<Window>>, Vec<Arc<SwapchainImage<Window>>>) {
         let caps = surface.capabilities(physical).unwrap();
         let alpha = caps.supported_composite_alpha.iter().next().unwrap();
-        let format = caps.supported_formats[0].0;
+        let format = vulkano::format::Format::B8G8R8A8Srgb;
         let dims: [u32; 2] = surface.window().inner_size().into();
         let layers = 1;
         let clipped = true;
@@ -307,6 +346,7 @@ impl Renderer {
                 .vertex_input_single_buffer::<Vertex>()
                 .vertex_shader(vs.main_entry_point(), ())
                 .triangle_list()
+                .blend_alpha_blending()
                 .viewports_dynamic_scissors_irrelevant(1)
                 .viewports(std::iter::once(Viewport {
                     origin: [0.0, 0.0],
@@ -329,10 +369,10 @@ impl Renderer {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_millis();
-        let period = 5 * 1000;
+        let period = 7 * 1000;
         let angle = Rad(2.0 * 3.14 * (time % period) as f32 / period as f32);
 
-        let eye = Point3::new(3.0, 2.0, 0.0);
+        let eye = Point3::new(2.0, 1.0, 0.0);
         let center = Point3::new(0.0, 0.0, 0.0);
         let up = Vector3::new(0.0, -1.0, 0.0);
 
@@ -382,6 +422,8 @@ impl Renderer {
         let set = Arc::new(
             PersistentDescriptorSet::start(layout.clone())
                 .add_buffer(uniform_subbuffer)
+                .unwrap()
+                .add_sampled_image(self.texture.clone(), self.sampler.clone())
                 .unwrap()
                 .build()
                 .unwrap(),
@@ -466,37 +508,42 @@ fn parse_obj<R: std::io::BufRead>(
     input: R,
 ) -> Result<(Vec<Vertex>, Vec<u32>), Box<dyn std::error::Error>> {
     let mut v: Vec<[f32; 3]> = Vec::new();
+    let mut vt: Vec<[f32; 2]> = Vec::new();
     let mut vn: Vec<[f32; 3]> = Vec::new();
-    let mut fv: Vec<u32> = Vec::new();
-    let mut fvn: Vec<u32> = Vec::new();
+
+    let mut f: Vec<(i64, i64, i64)> = Vec::new();
     let mut n: u32 = 0;
 
     for line in input.lines() {
         let line = line?;
-        let fields: Vec<&str> = line.split(" ").collect();
+        let fields: Vec<&str> = line.split_whitespace().collect();
         if fields.len() > 0 {
             match fields[0] {
                 "v" => {
-                    let floats: [f32; 3] = [
+                    v.push([
                         fields[1].parse()?,
                         fields[2].parse()?,
                         fields[3].parse()?,
-                    ];
-                    v.push(floats);
+                    ]);
+                }
+                "vt" => {
+                    vt.push([fields[1].parse()?, fields[2].parse()?]);
                 }
                 "vn" => {
-                    let floats: [f32; 3] = [
+                    vn.push([
                         fields[1].parse()?,
                         fields[2].parse()?,
                         fields[3].parse()?,
-                    ];
-                    vn.push(floats);
+                    ]);
                 }
                 "f" => {
-                    for f in fields[1..].iter() {
-                        let idxs: Vec<&str> = f.split("/").collect();
-                        fv.push(idxs[0].parse::<u32>()? - 1);
-                        fvn.push(idxs[2].parse::<u32>()? - 1);
+                    for vertex in fields[1..].iter() {
+                        let idxs: Vec<&str> = vertex.split("/").collect();
+                        f.push((
+                            idxs[0].parse()?,
+                            idxs[1].parse().unwrap_or_default(),
+                            idxs[2].parse().unwrap_or_default(),
+                        ));
                         n += 1;
                     }
                 }
@@ -506,10 +553,31 @@ fn parse_obj<R: std::io::BufRead>(
     }
 
     let mut vertices: Vec<Vertex> = Vec::with_capacity(n as usize);
-    for (vi, vni) in fv.iter().zip(fvn) {
+    for (vi, vti, vni) in f {
+        let vi = if vi < 0 {
+            v.len() + vi as usize
+        } else {
+            vi as usize - 1
+        };
+        let vti = if vti < 0 {
+            vt.len() + vti as usize
+        } else {
+            vti as usize - 1
+        };
+        let vni = if vni < 0 {
+            vn.len() + vni as usize
+        } else {
+            vni as usize - 1
+        };
+
         vertices.push(Vertex {
-            pos: v[*vi as usize],
-            normal: vn[vni as usize],
+            pos: v[vi],
+            texture: if vt.is_empty() {
+                [0.0, 0.0]
+            } else {
+                [vt[vti][0], 1.0 - vt[vti][1]]
+            },
+            normal: vn[vni],
         });
     }
 
@@ -518,18 +586,22 @@ fn parse_obj<R: std::io::BufRead>(
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() != 2 {
-        eprintln!("Provide a single .obj file as argument.");
+    if !(2 <= args.len() && args.len() <= 3) {
+        eprintln!("usage: <obj> [texture]");
         std::process::exit(1);
     }
-    let fname = &args[1];
-    let input = std::fs::File::open(fname)?;
+    let input = std::fs::File::open(&args[1])?;
     let input = std::io::BufReader::new(input);
     let (vertices, indices) = parse_obj(input)?;
 
+    let texture = match args.get(2) {
+        Some(fname) => Some(image::open(fname)?),
+        _ => None,
+    };
+
     let el = EventLoop::new();
     let mut r = Renderer::new(&el);
-    r.load_to_buffers(vertices, indices);
+    r.load_to_buffers(vertices, indices, texture);
 
     el.run(move |event, _, control_flow| match event {
         Event::WindowEvent {
