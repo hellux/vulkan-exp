@@ -183,7 +183,7 @@ impl Renderer {
         let mvp = Mvp {
             model: model,
             view: view,
-            proj: cgmath::perspective(Rad(1.0), aspect, 0.1, 10.0),
+            proj: cgmath::perspective(Rad(1.0), aspect, 0.1, 10000.0),
         };
 
         let uniform_subbuffer = self.uniform_buffer.next(mvp).unwrap();
