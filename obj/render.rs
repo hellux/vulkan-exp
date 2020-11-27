@@ -3,10 +3,8 @@ use std::sync::Arc;
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
-use vulkano_win::VkSurfaceBuild;
-
 use vulkano::buffer::cpu_pool::CpuBufferPool;
-use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer};
+use vulkano::buffer::{BufferUsage, ImmutableBuffer};
 use vulkano::command_buffer::{AutoCommandBufferBuilder, DynamicState};
 use vulkano::descriptor::descriptor_set::PersistentDescriptorSet;
 use vulkano::descriptor::PipelineLayoutAbstract;
@@ -28,7 +26,7 @@ use vulkano::swapchain::{
 };
 use vulkano::sync::{FlushError, GpuFuture};
 
-use cgmath::{Matrix4, Point3, Rad, SquareMatrix, Vector3};
+use cgmath::{Matrix4, Rad};
 
 use crate::types::{Mvp, Obj, Vertex};
 
@@ -47,8 +45,8 @@ pub struct Renderer {
     sampler: Arc<Sampler>,
 
     uniform_buffer: CpuBufferPool<Mvp>,
-    vertex_buffer: Arc<CpuAccessibleBuffer<[Vertex]>>,
-    index_buffer: Arc<CpuAccessibleBuffer<[u32]>>,
+    vertex_buffer: Arc<ImmutableBuffer<[Vertex]>>,
+    index_buffer: Arc<ImmutableBuffer<[u32]>>,
     texture: Arc<ImmutableImage<Format>>,
 
     swapchain_outdated: bool,
@@ -99,24 +97,26 @@ impl Renderer {
             render_pass.clone(),
         );
 
-        let uniform_buffer =
-            CpuBufferPool::<Mvp>::new(logical.clone(), BufferUsage::all());
-
-        let vertex_buffer = CpuAccessibleBuffer::from_iter(
+        let uniform_buffer = CpuBufferPool::<Mvp>::new(
             logical.clone(),
-            BufferUsage::all(),
-            false,
+            BufferUsage::uniform_buffer()
+        );
+
+        let (vertex_buffer, vbuf_future) = ImmutableBuffer::from_iter(
             obj.vertices.iter().cloned(),
+            BufferUsage::vertex_buffer(),
+            queue.clone(),
         )
         .unwrap();
+        vbuf_future.flush().unwrap();
 
-        let index_buffer = CpuAccessibleBuffer::from_iter(
-            logical.clone(),
-            BufferUsage::all(),
-            false,
+        let (index_buffer, ibuf_future) = ImmutableBuffer::from_iter(
             obj.indices.iter().cloned(),
+            BufferUsage::index_buffer(),
+            queue.clone(),
         )
         .unwrap();
+        ibuf_future.flush().unwrap();
 
         let (texture, tex_future) = if let Some(texture) = obj.texture {
             let buf = texture.into_bgra8();
@@ -141,10 +141,12 @@ impl Renderer {
             )
             .unwrap()
         };
+        tex_future.flush().unwrap();
 
         let sampler = Sampler::simple_repeat_linear_no_mipmap(logical.clone());
 
-        let previous_frame_end = Some(tex_future.boxed());
+        let previous_frame_end =
+            Some(vulkano::sync::now(logical.clone()).boxed());
 
         Renderer {
             surface,
