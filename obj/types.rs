@@ -31,7 +31,6 @@ impl Obj {
         let mut vn: Vec<[f32; 3]> = Vec::new();
 
         let mut f: Vec<(i64, i64, i64)> = Vec::new();
-        let mut n: u32 = 0;
 
         for line in obj_file.lines() {
             let line = line?;
@@ -62,8 +61,14 @@ impl Obj {
                                 let s: Vec<&str> = f.split("/").collect();
                                 [
                                     s[0].parse().unwrap(),
-                                    s[1].parse().unwrap_or(1),
-                                    s[2].parse().unwrap_or(1),
+                                    s.get(1)
+                                        .unwrap_or(&"")
+                                        .parse()
+                                        .unwrap_or(1),
+                                    s.get(2)
+                                        .unwrap_or(&"")
+                                        .parse()
+                                        .unwrap_or(1),
                                 ]
                             })
                             .collect();
@@ -72,7 +77,6 @@ impl Obj {
                             f.push((v0[0], v0[1], v0[2]));
                             f.push((v1[0], v1[1], v1[2]));
                             f.push((v2[0], v2[1], v2[2]));
-                            n += 3;
                         }
                     }
                     _ => {}
@@ -80,7 +84,8 @@ impl Obj {
             }
         }
 
-        let mut vertices: Vec<Vertex> = Vec::with_capacity(n as usize);
+        let n = f.len();
+        let mut vertices: Vec<Vertex> = Vec::with_capacity(n);
         for (vi, vti, vni) in f {
             let vi = if vi < 0 {
                 (v.len() as i64 + vi) as usize
@@ -100,18 +105,22 @@ impl Obj {
 
             vertices.push(Vertex {
                 pos: v[vi],
-                texture: if vt.is_empty() {
-                    [0.0, 0.0]
+                texture: if let Some(vt) = vt.get(vti) {
+                    [vt[0], 1.0 - vt[1]]
                 } else {
-                    [vt[vti][0], 1.0 - vt[vti][1]]
+                    [0.0, 0.0]
                 },
-                normal: vn[vni],
+                normal: if let Some(vn) = vn.get(vni) {
+                    *vn
+                } else {
+                    [1.0, 1.0, 1.0]
+                },
             });
         }
 
         Ok(Obj {
             vertices,
-            indices: (0..n).collect(),
+            indices: (0..n as u32).collect(),
             texture,
         })
     }
