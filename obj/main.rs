@@ -17,6 +17,8 @@ use view::Viewer;
 const SCANCODE_ESC: ScanCode = 1;
 const SCANCODE_LCTRL: ScanCode = 29;
 const SCANCODE_SPACE: ScanCode = 57;
+const SCANCODE_PLUS: ScanCode = 78;
+const SCANCODE_MINUS: ScanCode = 74;
 const SCANCODE_W: ScanCode = 17;
 const SCANCODE_A: ScanCode = 30;
 const SCANCODE_S: ScanCode = 31;
@@ -122,6 +124,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     SCANCODE_X => viewer.rotate_x(quarter * dir),
                     SCANCODE_Y => viewer.rotate_y(quarter * dir),
                     SCANCODE_Z => viewer.rotate_z(quarter * dir),
+                    SCANCODE_PLUS => viewer.increase_speed(),
+                    SCANCODE_MINUS => viewer.decrease_speed(),
                     _ => {}
                 }
             }
