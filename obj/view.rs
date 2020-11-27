@@ -3,7 +3,7 @@ use cgmath::*;
 const PI: Rad<f32> = Rad(std::f32::consts::PI);
 const SPEED: f32 = 1.0;
 const SPEED_LOSS: f32 = 0.9;
-const MOUSE_SENSITIVITY: f32 = 0.005;
+const MOUSE_SENSITIVITY: f32 = 0.001;
 
 pub struct Viewer {
     vel: Vector3<f32>,
@@ -18,7 +18,7 @@ impl Viewer {
     pub fn new() -> Self {
         Viewer {
             vel: Vector3::new(0.0, 0.0, 0.0),
-            pos: Vector3::new(0.0, 0.0, 0.0),
+            pos: Vector3::new(0.0, 0.0, 3.0),
             pitch: Rad(0.0),
             yaw: Rad(0.0),
 

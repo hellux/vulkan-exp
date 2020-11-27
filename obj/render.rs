@@ -1,8 +1,7 @@
 use std::sync::Arc;
 
 use winit::dpi::PhysicalSize;
-use winit::event_loop::EventLoop;
-use winit::window::{Window, WindowBuilder};
+use winit::window::Window;
 
 use vulkano_win::VkSurfaceBuild;
 
@@ -29,9 +28,9 @@ use vulkano::swapchain::{
 };
 use vulkano::sync::{FlushError, GpuFuture};
 
-use cgmath::{Matrix4, Point3, Rad, Vector3};
+use cgmath::{Matrix4, Point3, Rad, SquareMatrix, Vector3};
 
-use crate::types::{Obj, UniformBufferObject, Vertex};
+use crate::types::{Mvp, Obj, Vertex};
 
 pub struct Renderer {
     surface: Arc<Surface<Window>>,
@@ -47,7 +46,7 @@ pub struct Renderer {
     frag_shader: fs::Shader,
     sampler: Arc<Sampler>,
 
-    uniform_buffer: CpuBufferPool<UniformBufferObject>,
+    uniform_buffer: CpuBufferPool<Mvp>,
     vertex_buffer: Arc<CpuAccessibleBuffer<[Vertex]>>,
     index_buffer: Arc<CpuAccessibleBuffer<[u32]>>,
     texture: Arc<ImmutableImage<Format>>,
@@ -57,7 +56,7 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    pub fn new(el: &EventLoop<()>, obj: Obj) -> Self {
+    pub fn new(window: Window, obj: Obj) -> Self {
         let instance =
             Instance::new(None, &vulkano_win::required_extensions(), None)
                 .unwrap();
@@ -65,9 +64,8 @@ impl Renderer {
         let physical = PhysicalDevice::enumerate(&instance).next().unwrap();
         println!("physical: {}, {:?}", physical.name(), physical.ty());
 
-        let surface = WindowBuilder::new()
-            .build_vk_surface(el, instance.clone())
-            .unwrap();
+        let surface =
+            vulkano_win::create_vk_surface(window, instance.clone()).unwrap();
 
         let (logical, mut queues) =
             Renderer::create_logical(physical, &surface);
@@ -101,10 +99,8 @@ impl Renderer {
             render_pass.clone(),
         );
 
-        let uniform_buffer = CpuBufferPool::<UniformBufferObject>::new(
-            logical.clone(),
-            BufferUsage::all(),
-        );
+        let uniform_buffer =
+            CpuBufferPool::<Mvp>::new(logical.clone(), BufferUsage::all());
 
         let vertex_buffer = CpuAccessibleBuffer::from_iter(
             logical.clone(),
@@ -174,7 +170,7 @@ impl Renderer {
         self.swapchain_outdated = true;
     }
 
-    pub fn redraw(&mut self) {
+    pub fn redraw(&mut self, model: Matrix4<f32>, view: Matrix4<f32>) {
         self.previous_frame_end.as_mut().unwrap().cleanup_finished();
 
         if self.swapchain_outdated {
@@ -184,9 +180,13 @@ impl Renderer {
         let PhysicalSize { width, height } =
             self.surface.window().inner_size();
         let aspect = width as f32 / height as f32;
-        let ubo = Renderer::create_ubo(aspect);
+        let mvp = Mvp {
+            model: model,
+            view: view,
+            proj: cgmath::perspective(Rad(1.0), aspect, 0.1, 10.0),
+        };
 
-        let uniform_subbuffer = self.uniform_buffer.next(ubo).unwrap();
+        let uniform_subbuffer = self.uniform_buffer.next(mvp).unwrap();
 
         let layout = self.pipeline.descriptor_set_layout(0).unwrap();
         let set = Arc::new(
@@ -446,25 +446,6 @@ impl Renderer {
         );
 
         self.swapchain_outdated = false;
-    }
-
-    fn create_ubo(aspect: f32) -> UniformBufferObject {
-        let time = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis();
-        let period = 7 * 1000;
-        let angle = Rad(2.0 * 3.14 * (time % period) as f32 / period as f32);
-
-        let eye = Point3::new(2.0, 1.0, 0.0);
-        let center = Point3::new(0.0, 0.0, 0.0);
-        let up = Vector3::new(0.0, -1.0, 0.0);
-
-        UniformBufferObject {
-            model: Matrix4::from_angle_y(angle),
-            view: Matrix4::look_at(eye, center, up),
-            proj: cgmath::perspective(Rad(1.0), aspect, 0.1, 10.0),
-        }
     }
 }
 
