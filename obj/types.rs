@@ -56,14 +56,23 @@ impl Obj {
                         ]);
                     }
                     "f" => {
-                        for vertex in fields[1..].iter() {
-                            let idxs: Vec<&str> = vertex.split("/").collect();
-                            f.push((
-                                idxs[0].parse()?,
-                                idxs[1].parse().unwrap_or(1),
-                                idxs[2].parse().unwrap_or(1),
-                            ));
-                            n += 1;
+                        let vs: Vec<[i64; 3]> = fields[1..]
+                            .iter()
+                            .map(|f| {
+                                let s: Vec<&str> = f.split("/").collect();
+                                [
+                                    s[0].parse().unwrap(),
+                                    s[1].parse().unwrap_or(1),
+                                    s[2].parse().unwrap_or(1),
+                                ]
+                            })
+                            .collect();
+                        let v0 = vs[0];
+                        for (v1, v2) in vs[1..].iter().zip(vs[2..].iter()) {
+                            f.push((v0[0], v0[1], v0[2]));
+                            f.push((v1[0], v1[1], v1[2]));
+                            f.push((v2[0], v2[1], v2[2]));
+                            n += 3;
                         }
                     }
                     _ => {}
