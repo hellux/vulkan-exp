@@ -3,6 +3,7 @@ use cgmath::*;
 const PI: Rad<f32> = Rad(std::f32::consts::PI);
 const SPEED_STEP: f32 = 1.3;
 const SPEED_LOSS: f32 = 0.9;
+const SPEED_BOOST: f32 = 5.0;
 const MOUSE_SENSITIVITY: f32 = 0.001;
 
 pub struct Viewer {
@@ -11,6 +12,7 @@ pub struct Viewer {
     pitch: Rad<f32>,
     yaw: Rad<f32>,
     speed: f32,
+    boost: bool,
 
     model_rotation: Vector3<f32>,
 }
@@ -23,6 +25,7 @@ impl Viewer {
             pitch: Rad(0.0),
             yaw: Rad(0.0),
             speed: 1.0,
+            boost: false,
             model_rotation: Vector3::new(0.0, 0.0, 0.0),
         }
     }
@@ -64,6 +67,10 @@ impl Viewer {
         self.vel -= self.vertical();
     }
 
+    pub fn boost(&mut self, b: bool) {
+        self.boost = b;
+    }
+
     pub fn look(&mut self, dx: f32, dy: f32) {
         self.pitch -= Rad(dy) * MOUSE_SENSITIVITY;
         self.yaw -= Rad(dx) * MOUSE_SENSITIVITY;
@@ -94,19 +101,24 @@ impl Viewer {
         self.speed /= SPEED_STEP;
     }
 
+    fn speed(&self) -> f32 {
+        let boost = if self.boost { SPEED_BOOST } else { 1.0 };
+        self.speed * boost
+    }
+
     fn dir(&self) -> Vector3<f32> {
         -Matrix3::from_angle_y(self.yaw)
             * Matrix3::from_angle_x(self.pitch)
             * Vector3::unit_z()
-            * self.speed
+            * self.speed()
     }
 
     fn horizontal(&self, a: Rad<f32>) -> Vector3<f32> {
         let b = self.yaw + a;
-        -self.speed * Vector3::new(b.sin(), 0.0, b.cos())
+        -self.speed() * Vector3::new(b.sin(), 0.0, b.cos())
     }
 
     fn vertical(&self) -> Vector3<f32> {
-        Vector3::unit_y() * self.speed
+        Vector3::unit_y() * self.speed()
     }
 }

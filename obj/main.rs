@@ -16,6 +16,7 @@ use view::Viewer;
 
 const SCANCODE_ESC: ScanCode = 1;
 const SCANCODE_LCTRL: ScanCode = 29;
+const SCANCODE_LSHIFT: ScanCode = 42;
 const SCANCODE_SPACE: ScanCode = 57;
 const SCANCODE_PLUS: ScanCode = 78;
 const SCANCODE_MINUS: ScanCode = 74;
@@ -95,6 +96,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if *pressed.get(&SCANCODE_LCTRL).unwrap_or(&false) {
                 viewer.down();
             }
+            viewer.boost(*pressed.get(&SCANCODE_LSHIFT).unwrap_or(&false));
             viewer.tick(period);
 
             last_frame = now;
