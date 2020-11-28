@@ -40,16 +40,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(fname) => Some(image::open(fname)?),
         _ => None,
     };
-    let mut obj = Some(Obj::new(obj_file, texture)?);
+    let obj = Obj::new(obj_file, texture)?;
 
     let el = EventLoop::new();
-    let mut window = Some(WindowBuilder::new().build(&el).unwrap());
+    let window = WindowBuilder::new().build(&el)?;
 
     let mut viewer = Viewer::new();
     let mut pressed: HashMap<ScanCode, bool> = HashMap::new();
     let mut last_frame = Instant::now();
 
-    let mut renderer: Option<Renderer> = None;
+    let mut renderer = Renderer::new(window, obj);
 
     el.run(move |event, _, control_flow| match event {
         Event::WindowEvent {
@@ -59,23 +59,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             *control_flow = ControlFlow::Exit;
         }
         Event::WindowEvent {
+            event: WindowEvent::Focused(focused),
+            ..
+        } => {
+            let grabbed = renderer.window().set_cursor_grab(focused).is_ok();
+            renderer.window().set_cursor_visible(!grabbed);
+        },
+        Event::WindowEvent {
             event: WindowEvent::Resized(_),
             ..
         } => {
-            if let Some(r) = &mut renderer {
-                r.swapchain_outdated();
-            } else {
-                let o = std::mem::replace(&mut obj, None).unwrap();
-                let w = std::mem::replace(&mut window, None).unwrap();
-                w.set_cursor_grab(true).unwrap();
-                w.set_cursor_visible(false);
-                renderer = Some(Renderer::new(w, o));
-            }
+            renderer.swapchain_outdated();
         }
         Event::RedrawEventsCleared => {
-            if let Some(r) = &mut renderer {
-                r.redraw(viewer.model(), viewer.view());
-            }
+            renderer.redraw(viewer.model(), viewer.view());
 
             let now = Instant::now();
             let period =

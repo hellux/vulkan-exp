@@ -65,6 +65,8 @@ impl Renderer {
         let surface =
             vulkano_win::create_vk_surface(window, instance.clone()).unwrap();
 
+        surface.window().set_cursor_visible(true);
+
         let (logical, mut queues) =
             Renderer::create_logical(physical, &surface);
 
@@ -272,6 +274,10 @@ impl Renderer {
                     Some(vulkano::sync::now(self.logical.clone()).boxed());
             }
         }
+    }
+
+    pub fn window(&self) -> &Window {
+        self.surface.window()
     }
 
     fn create_logical(
