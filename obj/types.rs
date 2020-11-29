@@ -1,3 +1,8 @@
+use byteorder::{LittleEndian, ReadBytesExt};
+use std::error::Error;
+use std::fs::File;
+use std::io::{ErrorKind, Read, Seek, SeekFrom};
+
 use cgmath::Matrix4;
 
 #[allow(dead_code)] // read by GPU
@@ -25,7 +30,7 @@ impl Obj {
     pub fn new<R: std::io::BufRead>(
         obj_file: R,
         texture: Option<image::DynamicImage>,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    ) -> Result<Self, Box<dyn Error>> {
         let mut v: Vec<[f32; 3]> = Vec::new();
         let mut vt: Vec<[f32; 2]> = Vec::new();
         let mut vn: Vec<[f32; 3]> = Vec::new();
@@ -122,6 +127,67 @@ impl Obj {
             vertices,
             indices: (0..n as u32).collect(),
             texture,
+        })
+    }
+}
+
+const PSF2_MAGIC: [u8; 4] = [0x72, 0xb5, 0x4a, 0x86];
+
+pub struct Font {
+    pub length: u32,
+    pub width: u32,
+    pub height: u32,
+    pub data: Vec<u8>,
+}
+
+impl Font {
+    pub fn from_psf2(mut f: File) -> Result<Self, Box<dyn Error>> {
+        let mut magic = [0; 4];
+        f.read(&mut magic)?;
+
+        if magic.iter().zip(PSF2_MAGIC.iter()).any(|(a, b)| a != b) {
+            return Err(Box::new(std::io::Error::new(
+                ErrorKind::InvalidData,
+                "not a psf2 file",
+            )));
+        }
+
+        let _version = f.read_u32::<LittleEndian>().unwrap();
+        let headersize = f.read_u32::<LittleEndian>().unwrap();
+        let _flags = f.read_u32::<LittleEndian>().unwrap();
+        let length = f.read_u32::<LittleEndian>().unwrap();
+        let _charsize = f.read_u32::<LittleEndian>().unwrap();
+        let height = f.read_u32::<LittleEndian>().unwrap();
+        let width = f.read_u32::<LittleEndian>().unwrap();
+
+        if width != 8 {
+            return Err(Box::new(std::io::Error::new(
+                ErrorKind::InvalidData,
+                "font width must be 8px",
+            )));
+        }
+
+        let nbytes = (length * height) as usize;
+        let mut bytes: Vec<u8> = Vec::with_capacity(nbytes);
+        bytes.resize_with(nbytes, Default::default);
+        f.seek(SeekFrom::Start(headersize as u64))?;
+        f.read_exact(&mut bytes)?;
+
+        /* Convert each bit (pixel) to a single byte */
+        let npixels = nbytes * width as usize;
+        let mut data: Vec<u8> = Vec::with_capacity(npixels);
+        for b in bytes {
+            for i in 0..width {
+                let pixel = 255 * ((b >> (7 - i)) & 1);
+                data.push(pixel);
+            }
+        }
+
+        Ok(Font {
+            length,
+            width,
+            height,
+            data,
         })
     }
 }
