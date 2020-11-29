@@ -11,7 +11,7 @@ mod render;
 mod types;
 mod view;
 use render::Renderer;
-use types::Obj;
+use types::{Font, Obj};
 use view::Viewer;
 
 const SCANCODE_ESC: ScanCode = 1;
@@ -27,6 +27,8 @@ const SCANCODE_D: ScanCode = 32;
 const SCANCODE_X: ScanCode = 45;
 const SCANCODE_Y: ScanCode = 21;
 const SCANCODE_Z: ScanCode = 44;
+
+const REFRESH_OVERLAY_PERIOD: f32 = 1.0;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
@@ -50,7 +52,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut pressed: HashMap<ScanCode, bool> = HashMap::new();
     let mut last_frame = Instant::now();
 
+    let font = std::fs::File::open("overlay.psf").map(|f| Font::from_psf2(f));
+
     let mut renderer = Renderer::new(window, obj);
+    if let Ok(Ok(font)) = font {
+        renderer = renderer.with_overlay(font);
+    } else {
+        eprintln!("overlay font failed to load")
+    }
+
+    let mut overlay_period = 0.0;
+    let mut overlay_frames = 0;
 
     el.run(move |event, _, control_flow| match event {
         Event::WindowEvent {
@@ -65,7 +77,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } => {
             let grabbed = renderer.window().set_cursor_grab(focused).is_ok();
             renderer.window().set_cursor_visible(!grabbed);
-        },
+        }
         Event::WindowEvent {
             event: WindowEvent::Resized(_),
             ..
@@ -73,11 +85,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             renderer.swapchain_outdated();
         }
         Event::RedrawEventsCleared => {
-            renderer.redraw(viewer.model(), viewer.view());
-
             let now = Instant::now();
             let period =
                 now.duration_since(last_frame).as_micros() as f32 / 1e6;
+            last_frame = now;
+
+            if let Some(overlay) = renderer.overlay_mut() {
+                overlay_period += period;
+                overlay_frames += 1;
+
+                if overlay_period > REFRESH_OVERLAY_PERIOD {
+                    let fps = (overlay_frames as f32 / overlay_period).round();
+                    overlay.add_text(0, 0, 1.0, fps.to_string().as_str());
+                    overlay.load_text();
+
+                    overlay_period = 0.0;
+                    overlay_frames = 0;
+                }
+
+            }
+
             if *pressed.get(&SCANCODE_W).unwrap_or(&false) {
                 viewer.forward();
             }
@@ -99,7 +126,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             viewer.boost(*pressed.get(&SCANCODE_LSHIFT).unwrap_or(&false));
             viewer.tick(period);
 
-            last_frame = now;
+            renderer.redraw(viewer.model(), viewer.view());
         }
         Event::WindowEvent {
             event:
@@ -108,7 +135,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         KeyboardInput {
                             scancode,
                             state,
-                            modifiers,
                             ..
                         },
                     ..
@@ -116,13 +142,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ..
         } => {
             let quarter = std::f32::consts::PI / 2.0;
-            let dir = if modifiers.shift() { -1.0 } else { 1.0 };
             if state == ElementState::Pressed {
                 match scancode {
                     SCANCODE_ESC => *control_flow = ControlFlow::Exit,
-                    SCANCODE_X => viewer.rotate_x(quarter * dir),
-                    SCANCODE_Y => viewer.rotate_y(quarter * dir),
-                    SCANCODE_Z => viewer.rotate_z(quarter * dir),
+                    SCANCODE_X => viewer.rotate_x(quarter),
+                    SCANCODE_Y => viewer.rotate_y(quarter),
+                    SCANCODE_Z => viewer.rotate_z(quarter),
                     SCANCODE_PLUS => viewer.increase_speed(),
                     SCANCODE_MINUS => viewer.decrease_speed(),
                     _ => {}
