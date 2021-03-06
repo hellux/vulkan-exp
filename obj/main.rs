@@ -102,7 +102,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     overlay_period = 0.0;
                     overlay_frames = 0;
                 }
-
             }
 
             if *pressed.get(&SCANCODE_W).unwrap_or(&false) {
@@ -133,9 +132,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 WindowEvent::KeyboardInput {
                     input:
                         KeyboardInput {
-                            scancode,
-                            state,
-                            ..
+                            scancode, state, ..
                         },
                     ..
                 },

@@ -5,7 +5,9 @@ use winit::window::Window;
 
 use vulkano::buffer::cpu_pool::CpuBufferPoolChunk;
 use vulkano::buffer::{BufferUsage, CpuBufferPool, ImmutableBuffer};
-use vulkano::command_buffer::{AutoCommandBufferBuilder, DynamicState};
+use vulkano::command_buffer::{
+    AutoCommandBufferBuilder, DynamicState, SubpassContents,
+};
 use vulkano::descriptor::descriptor_set::{
     PersistentDescriptorSet, PersistentDescriptorSetImg,
     PersistentDescriptorSetSampler,
@@ -18,7 +20,7 @@ use vulkano::framebuffer::{
 };
 use vulkano::image::attachment::AttachmentImage;
 use vulkano::image::immutable::ImmutableImage;
-use vulkano::image::{Dimensions, ImageUsage, SwapchainImage};
+use vulkano::image::{Dimensions, ImageUsage, MipmapsCount, SwapchainImage};
 use vulkano::instance::{Instance, PhysicalDevice};
 use vulkano::memory::pool::StdMemoryPool;
 use vulkano::pipeline::viewport::Viewport;
@@ -137,6 +139,7 @@ impl Renderer {
             ImmutableImage::from_iter(
                 buf.into_raw().iter().cloned(),
                 Dimensions::Dim2d { width, height },
+                MipmapsCount::One,
                 swapchain.format(),
                 queue.clone(),
             )
@@ -149,6 +152,7 @@ impl Renderer {
                     width: 1,
                     height: 1,
                 },
+                MipmapsCount::One,
                 swapchain.format(),
                 queue.clone(),
             )
@@ -183,15 +187,13 @@ impl Renderer {
     }
 
     pub fn with_overlay(mut self, font: Font) -> Self {
-        self.overlay = Some(
-            TextOverlay::new(
-                self.logical.clone(),
-                self.queue.clone(),
-                self.swapchain.format(),
-                self.dimensions,
-                font,
-            )
-        );
+        self.overlay = Some(TextOverlay::new(
+            self.logical.clone(),
+            self.queue.clone(),
+            self.swapchain.format(),
+            self.dimensions,
+            font,
+        ));
         self
     }
 
@@ -256,7 +258,7 @@ impl Renderer {
         builder
             .begin_render_pass(
                 self.framebuffers[image_num].clone(),
-                false,
+                SubpassContents::Inline,
                 clear_values,
             )
             .unwrap()
@@ -567,6 +569,7 @@ impl TextOverlay {
                     width: font.width,
                     height: font.length * font.height,
                 },
+                MipmapsCount::One,
                 Format::R8Unorm,
                 queue.clone(),
             )

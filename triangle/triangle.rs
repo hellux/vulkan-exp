@@ -21,7 +21,9 @@ use vulkano::framebuffer::{Subpass, Framebuffer,
     FramebufferAbstract, RenderPassAbstract};
 use vulkano::buffer::{BufferUsage, CpuAccessibleBuffer};
 use vulkano::buffer::cpu_pool::CpuBufferPool;
-use vulkano::command_buffer::{AutoCommandBufferBuilder, DynamicState};
+use vulkano::command_buffer::{
+    AutoCommandBufferBuilder, DynamicState, SubpassContents
+};
 use vulkano::sync::{FlushError, GpuFuture};
 
 use cgmath::{Matrix4, Vector3, Point3, Rad};
@@ -379,7 +381,7 @@ impl Renderer {
         builder
             .begin_render_pass(
                 self.framebuffers[image_num].clone(),
-                false,
+                SubpassContents::Inline,
                 clear_values).unwrap()
             .draw_indexed(
                 self.pipeline.clone(),
