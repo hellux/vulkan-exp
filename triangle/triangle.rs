@@ -389,7 +389,8 @@ impl Renderer {
                 vec![self.vertex_buffer.clone()],
                 self.index_buffer.clone(),
                 set.clone(),
-                ()).unwrap()
+                (),
+                vec![]).unwrap()
             .end_render_pass().unwrap();
 
         let command_buffer = builder.build().unwrap();

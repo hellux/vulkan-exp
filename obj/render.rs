@@ -269,6 +269,7 @@ impl Renderer {
                 self.index_buffer.clone(),
                 set.clone(),
                 (),
+                vec![],
             )
             .unwrap();
 
@@ -281,6 +282,7 @@ impl Renderer {
                     overlay.index_chunk.clone(),
                     overlay.set.clone(),
                     (),
+                    vec![],
                 )
                 .unwrap();
         }
